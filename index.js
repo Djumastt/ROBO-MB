@@ -219,10 +219,6 @@ async function startBot() {
         const usuarioTag = `@${participante.split('@')[0]}`;
         const text = (mek.message.conversation || mek.message.extendedTextMessage?.text || mek.message.imageMessage?.caption || mek.message.documentMessage?.caption || "").trim();
 
-        if (isGroup && sender !== GRUPO_PERMITIDO_ID) {
-            return;
-        }
-
         const sendMention = async (mensagem) => {
             await sock.sendMessage(sender, { 
                 text: `${mensagem}\n\n${usuarioTag}`, 
@@ -230,6 +226,22 @@ async function startBot() {
                 contextInfo: { mentionedJid: [participante] }
             });
         };
+
+        // --- RETIFICAÇÃO 1: RESPOSTA AUTOMÁTICA EM MENSAGEM PRIVADA (PV) ---
+        if (!isGroup) {
+            await sendMention(
+                `*CARO CLIENTE*\n\n` +
+                `Eu sou apenas um robô que não consigo falar directamente.\n` +
+                `Peço desculpa 🙏\n` +
+                `Falem com ADM Oficial\n` +
+                `Número: 258 85 867 4827`
+            );
+            return;
+        }
+
+        if (isGroup && sender !== GRUPO_PERMITIDO_ID) {
+            return;
+        }
 
         async function verificarAdmin(userJid) {
             if (!isGroup) return true;
@@ -322,7 +334,7 @@ async function startBot() {
             }
         }
 
-// --- MANUSEIO DE SESSÃO INTERATIVA .addtb ---
+        // --- MANUSEIO DE SESSÃO INTERATIVA .addtb ---
         if (sessoesTb[participante]) {
             const stb = sessoesTb[participante];
 
@@ -451,7 +463,7 @@ async function startBot() {
             }
         }
 
-if (text.startsWith('.')) {
+        if (text.startsWith('.')) {
             if (!isGroup) {
                 await sock.sendMessage(sender, { text: '❌ Este comando só pode ser usado dentro de grupos.' }, { quoted: mek });
                 return;
@@ -814,7 +826,40 @@ if (text.startsWith('.')) {
             return;
         }
 
-// --- LÓGICA DE AVISO DA MOVITEL ---
+        // --- RETIFICAÇÃO 2: MODERAÇÃO RÍGIDA DE IMAGENS E ÁUDIOS (APAGA MESMO COM LEGENDA OU TEXTO) ---
+        const isImage = !!(
+            mek.message.imageMessage || 
+            mek.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
+            (mek.message.documentMessage?.mimetype && mek.message.documentMessage.mimetype.startsWith('image/'))
+        );
+                        
+        const isAudio = !!(mek.message.audioMessage || mek.message.voiceMessage);
+
+        if (isImage || isAudio) {
+            if (isGroup) {
+                const isAdminMidia = await verificarAdmin(participante);
+                if (!isAdminMidia) {
+                    try {
+                        await sock.sendMessage(sender, { delete: mek.key });
+                        
+                        let mensagemAviso = isImage 
+                            ? `❌ Processamento de imagens desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`
+                            : `❌ Processamento de áudios desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`;
+
+                        await sock.sendMessage(sender, { 
+                            text: `${mensagemAviso}\n\n${usuarioTag}`,
+                            mentions: [participante],
+                            contextInfo: { mentionedJid: [participante] }
+                        });
+                    } catch (err) {
+                        console.log("Erro ao apagar multimédia (imagem/áudio):", err);
+                    }
+                    return;
+                }
+            }
+        }
+
+        // --- LÓGICA DE AVISO DA MOVITEL ---
         if (text.toLowerCase().includes('movitel')) {
             await sendMention(
                 `🚨 *CARO CLIENTE* 🚨\n` +
@@ -993,36 +1038,6 @@ if (text.startsWith('.')) {
             await sendMention(resGeral.resposta);
             return;
         }
-
-        const isImage = mek.message.imageMessage || 
-                        (mek.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) ||
-                        mek.message.documentMessage?.mimetype?.startsWith('image/');
-                        
-        const isAudio = mek.message.audioMessage || mek.message.voiceMessage;
-
-        if (isImage || isAudio) {
-            if (isGroup) {
-                const isAdminMidia = await verificarAdmin(participante);
-                if (!isAdminMidia) {
-                    try {
-                        await sock.sendMessage(sender, { delete: mek.key });
-                        
-                        let mensagemAviso = isImage 
-                            ? `❌ Processamento de imagens desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`
-                            : `❌ Processamento de áudios desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`;
-
-                        await sock.sendMessage(sender, { 
-                            text: `${mensagemAviso}\n\n${usuarioTag}`,
-                            mentions: [participante],
-                            contextInfo: { mentionedJid: [participante] }
-                        });
-                    } catch (err) {
-                        console.log("Erro ao apagar multimédia (imagem/áudio):", err);
-                    }
-                    return;
-                }
-            }
-        }
     });
 }
 
@@ -1127,3 +1142,4 @@ function iniciarMonitorMacrodroid(sock) {
 }
 
 startBot();
+
