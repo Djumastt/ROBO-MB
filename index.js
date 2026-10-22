@@ -6,8 +6,11 @@ const supabaseUrl = 'https://lvdhbzjksspozeionbyg.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ID do Grupo Permitido
-const GRUPO_PERMITIDO_ID = "120363411305953520@g.us";
+// IDs dos Grupos Permitidos
+const GRUPOS_PERMITIDOS = [
+    "120363411305953520@g.us", // VENDAS DE MB
+    "120363431552165371@g.us"  // NET BARATOS
+];
 
 const sessoesAdmin = {};
 const sessoesTb = {};
@@ -81,7 +84,7 @@ async function obterProximaTabelaFila() {
     return TABELAS_FILA[proximoIndiceValido];
 }
 
-// Função para inserir na fila correta de acordo com a regra circular
+// Função para inserir na fila correta de acordo com a regra circular (incluindo o grupo de origem)
 async function inserirNaFilaAtiva(dadosPedido) {
     const tabelaDestino = await obterProximaTabelaFila();
     const { error } = await supabase.from(tabelaDestino).insert([dadosPedido]);
@@ -140,7 +143,7 @@ async function startBot() {
 
     iniciarMonitorMacrodroid(sock);
 
-    // Função centralizada e corrigida para enviar boas-vindas
+    // Função centralizada para enviar boas-vindas
     const membrosCumprimentados = new Set();
     async function enviarBoasVindas(grupoId, membroInput) {
         let jidFinal = "";
@@ -167,7 +170,7 @@ async function startBot() {
 
         const msgBoasVindas = `👋 *𝙱𝙴𝙼-𝚅𝙸𝙽𝙳𝙾(𝙰)* 👋\n\n` +
             `*🎉 Bem-vindo(a) ${usuarioTag},\n` +
-            `Você entrou no grupo -{⚡Vendas de Megas⚡}\n` +
+            `Você entrou no grupo gerido pelo sistema!\n` +
             `*📦 Para ver os pacotes* disponíveis: \n` +
             `\`👉 Tabela\` ou  \`Preços\`\n\n` +
             `*👉 Para Diamante:* \`ilimitado\`\n\n` +
@@ -183,10 +186,10 @@ async function startBot() {
         });
     }
 
-    // EVENTO 1: Atualização de participantes
+    // EVENTO 1: Atualização de participantes para ambos os grupos
     sock.ev.on('group-participants.update', async (num) => {
         try {
-            if (num.id === GRUPO_PERMITIDO_ID && num.action === 'add') {
+            if (GRUPOS_PERMITIDOS.includes(num.id) && num.action === 'add') {
                 for (let novoMembro of num.participants) {
                     await enviarBoasVindas(num.id, novoMembro);
                 }
@@ -205,7 +208,7 @@ async function startBot() {
         const participante = mek.key.participant || sender; 
         const isGroup = sender.endsWith('@g.us');
 
-        if (isGroup && sender === GRUPO_PERMITIDO_ID) {
+        if (isGroup && GRUPOS_PERMITIDOS.includes(sender)) {
             const isStubAdd = mek.messageStubType === 27 || mek.messageStubType === 28 || mek.messageStubType === 32;
             if (isStubAdd && mek.messageStubParameters && mek.messageStubParameters.length > 0) {
                 for (let novoMembro of mek.messageStubParameters) {
@@ -227,7 +230,7 @@ async function startBot() {
             });
         };
 
-        // --- RETIFICAÇÃO 1: RESPOSTA AUTOMÁTICA EM MENSAGEM PRIVADA (PV) ---
+        // Resposta automática em mensagem privada (PV)
         if (!isGroup) {
             await sendMention(
                 `*CARO CLIENTE*\n\n` +
@@ -239,7 +242,8 @@ async function startBot() {
             return;
         }
 
-        if (isGroup && sender !== GRUPO_PERMITIDO_ID) {
+        // Ignora grupos que não estejam na lista de permitidos
+        if (isGroup && !GRUPOS_PERMITIDOS.includes(sender)) {
             return;
         }
 
@@ -600,12 +604,14 @@ async function startBot() {
                     const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorConfirmado).maybeSingle();
                     const pacoteMegas = (preco && preco.megas) ? preco.megas : 'N/A';
 
+                    // Registra o pedido guardando o grupo de origem
                     await inserirNaFilaAtiva({
                         telefone: numeroVodacom,
                         pacote: pacoteMegas,
                         status: 'pendente',
                         sender: clienteAlvo,
-                        referencia: refConfirmada
+                        referencia: refConfirmada,
+                        grupo_origem: sender
                     });
 
                     const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -808,16 +814,18 @@ async function startBot() {
                     data_uso: new Date().toISOString()
                 }]);
 
+                // Registra o pedido guardando o grupo de origem
                 await inserirNaFilaAtiva({
                     telefone: telefoneSolicitado,
                     pacote: megasFinais,
                     status: 'pendente',
                     sender: participante,
-                    referencia: referenciaFinal
+                    referencia: referenciaFinal,
+                    grupo_origem: sender
                 });
 
                 const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
-                const msgSucessoComprar = `✅ *PEDIDO CRIADO COM SUCESSO!*\n\n💰 Referência: ${referenciaFinal}\n📊 Megas: ${megasFinais}\n📱 Número: ${telefoneSolicitado}\n📍 Grupo: Vendas de Megas\n\n🔄 Pedido registrado e aguardando processamento.\n⏰ ${dataHoraAtual}`;
+                const msgSucessoComprar = `✅ *PEDIDO CRIADO COM SUCESSO!*\n\n💰 Referência: ${referenciaFinal}\n📊 Megas: ${megasFinais}\n📱 Número: ${telefoneSolicitado}\n🔄 Pedido registrado e aguardando processamento.\n⏰ ${dataHoraAtual}`;
 
                 await sendMention(msgSucessoComprar);
                 return;
@@ -826,7 +834,7 @@ async function startBot() {
             return;
         }
 
-        // --- RETIFICAÇÃO 2: MODERAÇÃO RÍGIDA DE IMAGENS E ÁUDIOS (APAGA MESMO COM LEGENDA OU TEXTO) ---
+        // Moderação de imagens e áudios
         const isImage = !!(
             mek.message.imageMessage || 
             mek.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
@@ -843,8 +851,8 @@ async function startBot() {
                         await sock.sendMessage(sender, { delete: mek.key });
                         
                         let mensagemAviso = isImage 
-                            ? `❌ Processamento de imagens desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`
-                            : `❌ Processamento de áudios desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.\n\nℹ️ Esta medida foi adotada para garantir que o sistema funcione de forma mais rápida, estável e com menos falhas.`;
+                            ? `❌ Processamento de imagens desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.`
+                            : `❌ Processamento de áudios desactivado \n📄 Solicitamos que o comprovante seja enviado em formato de texto.`;
 
                         await sock.sendMessage(sender, { 
                             text: `${mensagemAviso}\n\n${usuarioTag}`,
@@ -852,7 +860,7 @@ async function startBot() {
                             contextInfo: { mentionedJid: [participante] }
                         });
                     } catch (err) {
-                        console.log("Erro ao apagar multimédia (imagem/áudio):", err);
+                        console.log("Erro ao apagar multimédia:", err);
                     }
                     return;
                 }
@@ -893,7 +901,7 @@ async function startBot() {
             
             if (jaUsado) {
                 const dataFormatada = new Date(jaUsado.data_uso || Date.now()).toLocaleString('pt-PT');
-                await sendMention(`❌ ${usuarioTag} *Comprovativo já utilizado!*\n\n👤 *Utilizado por:* ${jaUsado.usado_por || 'Desconhecido'}\n📅 *Data:* ${dataFormatada}\n\nEste comprovativo não pode ser processado novamente.`);
+                await sendMention(`❌ ${usuarioTag} *Comprovativo já utilizado!*\n\n👤 *Utilizado por:* ${jaUsado.usado_por || 'Desconhecido'}\n📅 *Data:* ${dataFormatada}`);
                 return;
             }
 
@@ -905,7 +913,7 @@ async function startBot() {
                 .maybeSingle();
 
             if (!transacaoReal) {
-                await sendMention(`❌ *COMPROVATIVO INVÁLIDO OU NÃO ENCONTRADO!*\n\nVerifique se a referência está correta ou se já foi processada.`);
+                await sendMention(`❌ *COMPROVATIVO INVÁLIDO OU NÃO ENCONTRADO!*`);
                 return;
             }
 
@@ -923,12 +931,14 @@ async function startBot() {
 
                 const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', transacaoReal.valor).maybeSingle();
                 
+                // Registra o pedido guardando o grupo de origem
                 await inserirNaFilaAtiva({
                     telefone: numeroVodacom,
                     pacote: preco?.megas || 'N/A',
                     status: 'pendente',
                     sender: participante,
-                    referencia: referencia
+                    referencia: referencia,
+                    grupo_origem: sender
                 });
 
                 const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -945,7 +955,7 @@ async function startBot() {
             
             await supabase.from('transecoes_pendentes').update({ status: 'em_uso' }).eq('id', transacaoReal.id);
             
-            await sendMention(`✅ *Comprovativo approved!*\nEnvie o número Vodacom agora para concluir.`);
+            await sendMention(`✅ *Comprovativo aprovado!*\nEnvie o número Vodacom agora para concluir.`);
             return;
         }
 
@@ -970,11 +980,7 @@ async function startBot() {
             const isVodacom = numeroLimpoText.length === 9 && /^8[45]/.test(numeroLimpoText);
 
             if (!isVodacom) {
-                await sendMention(
-                    `❌ *Número Inválido!*\n` +
-                    `Vendemos apenas Megas da Vodacom.\n` +
-                    `Por favor, envie um número da Vodacom que comece por 84 ou 85 para receber os dados.`
-                );
+                await sendMention(`❌ *Número Inválido!* Envie um número Vodacom que comece por 84 ou 85.`);
                 return;
             }
 
@@ -990,12 +996,14 @@ async function startBot() {
 
             const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', mem.valor).maybeSingle();
             
+            // Registra o pedido guardando o grupo de origem
             await inserirNaFilaAtiva({
                 telefone: numeroLimpoText,
                 pacote: preco?.megas || 'N/A',
                 status: 'pendente',
                 sender: participante,
-                referencia: mem.referencia
+                referencia: mem.referencia,
+                grupo_origem: sender
             });
 
             const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -1056,7 +1064,7 @@ function iniciarMonitorMacrodroid(sock) {
                     numLimpoMacro = numLimpoMacro.slice(-9);
                 }
 
-                // Varre todas as 10 tabelas de fila para encontrar o pedido correspondente
+                // Varre todas as tabelas de fila para encontrar o pedido correspondente
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
@@ -1110,10 +1118,10 @@ function iniciarMonitorMacrodroid(sock) {
                     referenciaTransacao = referenciaTransacao || 'N/A';
                     const clienteTag = clienteSender ? `@${clienteSender.split('@')[0]}` : '@Cliente';
 
-                    const grupoJid = GRUPO_PERMITIDO_ID; 
+                    // Envia a notificação para o grupo correto onde o pedido foi gerado (ou fallback para o primeiro grupo)
+                    const grupoDestino = pedidoFila.grupo_origem || GRUPOS_PERMITIDOS[0]; 
                     const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
 
-                    // Formatação do nome da Fila para a mensagem final
                     let nomeFilaFormatado = "Fila Mãe";
                     if (tabelaEncontrada.includes('_')) {
                         const num = tabelaEncontrada.split('_').pop();
@@ -1122,12 +1130,12 @@ function iniciarMonitorMacrodroid(sock) {
 
                     const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Fila:* Finalizado com ${nomeFilaFormatado}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
-                    await sock.sendMessage(grupoJid, { 
+                    await sock.sendMessage(grupoDestino, { 
                         text: mensagemSucesso,
                         mentions: clienteSender ? [clienteSender] : []
                     });
 
-                    console.log(`Transação para o número ${pedidoFila.telefone} validada na tabela ${tabelaEncontrada} com sucesso!`);
+                    console.log(`Transação para o número ${pedidoFila.telefone} validada e enviada para o grupo ${grupoDestino}!`);
                 }
 
                 await supabase
