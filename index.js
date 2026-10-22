@@ -6,11 +6,8 @@ const supabaseUrl = 'https://lvdhbzjksspozeionbyg.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Lista de IDs dos Grupos Permitidos
-const GRUPOS_PERMITIDOS = [
-    "120363411305953520@g.us", // VENDAS DE MB
-    "120363431552165371@g.us"  // NET BARATOS
-];
+// ID do Grupo Permitido
+const GRUPO_PERMITIDO_ID = "120363411305953520@g.us";
 
 const sessoesAdmin = {};
 const sessoesTb = {};
@@ -31,6 +28,7 @@ const TABELAS_FILA = [
 
 let indiceUltimaFila = 0;
 
+// Memória local para garantir sincronização imediata dos estados das filas
 const memoriaFilas = {
     'fila_macrodroid': true,
     'fila_macrodroid_1': false,
@@ -44,6 +42,7 @@ const memoriaFilas = {
     'fila_macrodroid_9': false
 };
 
+// Carrega a configuração do Supabase no arranque
 async function carregarConfigFilas() {
     try {
         const { data } = await supabase.from('config_filas').select('*');
@@ -59,6 +58,7 @@ async function carregarConfigFilas() {
     }
 }
 
+// Função auxiliar para obter a próxima tabela ativa em Round-Robin (começando sempre pela mãe)
 async function obterProximaTabelaFila() {
     let indicesAtivos = [];
     TABELAS_FILA.forEach((tabela, idx) => {
@@ -67,19 +67,29 @@ async function obterProximaTabelaFila() {
         }
     });
 
-    if (indicesAtivos.length === 0) return 'fila_macrodroid';
+    if (indicesAtivos.length === 0) {
+        return 'fila_macrodroid';
+    }
 
     let proximoIndiceValido = indicesAtivos.find(idx => idx > indiceUltimaFila);
-    if (proximoIndiceValido === undefined) proximoIndiceValido = indicesAtivos[0];
+    
+    if (proximoIndiceValido === undefined) {
+        proximoIndiceValido = indicesAtivos[0];
+    }
 
     indiceUltimaFila = proximoIndiceValido;
     return TABELAS_FILA[proximoIndiceValido];
 }
 
+// Função para inserir na fila correta de acordo com a regra circular
 async function inserirNaFilaAtiva(dadosPedido) {
     const tabelaDestino = await obterProximaTabelaFila();
     const { error } = await supabase.from(tabelaDestino).insert([dadosPedido]);
-    if (error) console.log(`Erro ao inserir na tabela ${tabelaDestino}:`, error);
+    if (error) {
+        console.log(`Erro ao inserir na tabela ${tabelaDestino}:`, error);
+    } else {
+        console.log(`Pedido direcionado com sucesso para a tabela: ${tabelaDestino}`);
+    }
     return tabelaDestino;
 }
 
@@ -96,6 +106,7 @@ async function startBot() {
         markOnlineOnConnect: true
     });
 
+    // --- PAREAMENTO AUTOMÁTICO VIA CÓDIGO (SE NÃO ESTIVER CONECTADO) ---
     if (!sock.authState.creds.registered) {
         const readline = require('readline').createInterface({ input: process.stdin, output: process.stdout });
         const phoneNumber = await new Promise((resolve) => {
@@ -119,7 +130,9 @@ async function startBot() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
+            if (shouldReconnect) {
+                startBot();
+            }
         } else if (connection === 'open') {
             console.log("🤖 ROBÔ LIGADO COM SUCESSO ✅");
         }
@@ -127,23 +140,34 @@ async function startBot() {
 
     iniciarMonitorMacrodroid(sock);
 
+    // Função centralizada e corrigida para enviar boas-vindas
     const membrosCumprimentados = new Set();
     async function enviarBoasVindas(grupoId, membroInput) {
         let jidFinal = "";
-        if (typeof membroInput === 'object' && membroInput !== null) jidFinal = membroInput.phoneNumber || membroInput.id || "";
-        else if (typeof membroInput === 'string') jidFinal = membroInput;
+
+        if (typeof membroInput === 'object' && membroInput !== null) {
+            jidFinal = membroInput.phoneNumber || membroInput.id || "";
+        } else if (typeof membroInput === 'string') {
+            jidFinal = membroInput;
+        }
 
         if (!jidFinal) return;
-        if (!jidFinal.includes('@')) jidFinal = `${jidFinal}@s.whatsapp.net`;
+
+        if (!jidFinal.includes('@')) {
+            jidFinal = `${jidFinal}@s.whatsapp.net`;
+        }
 
         if (membrosCumprimentados.has(jidFinal)) return;
         membrosCumprimentados.add(jidFinal);
+        
         setTimeout(() => membrosCumprimentados.delete(jidFinal), 60000);
 
-        const usuarioTag = `@${jidFinal.split('@')[0]}`;
+        const numeroApenas = jidFinal.split('@')[0];
+        const usuarioTag = `@${numeroApenas}`;
+
         const msgBoasVindas = `👋 *𝙱𝙴𝙼-𝚅𝙸𝙽𝙳𝙾(𝙰)* 👋\n\n` +
             `*🎉 Bem-vindo(a) ${usuarioTag},\n` +
-            `Você entrou no grupo gerido pelo sistema!\n` +
+            `Você entrou no grupo -{⚡Vendas de Megas⚡}\n` +
             `*📦 Para ver os pacotes* disponíveis: \n` +
             `\`👉 Tabela\` ou  \`Preços\`\n\n` +
             `*👉 Para Diamante:* \`ilimitado\`\n\n` +
@@ -153,19 +177,26 @@ async function startBot() {
             `_☎️+258 85 867 4827\n\n` +
             `*⚡ Ofertas rápidas, seguras e sem complicações*`;
 
-        await sock.sendMessage(grupoId, { text: msgBoasVindas, mentions: [jidFinal] });
+        await sock.sendMessage(grupoId, {
+            text: msgBoasVindas,
+            mentions: [jidFinal]
+        });
     }
 
+    // EVENTO 1: Atualização de participantes
     sock.ev.on('group-participants.update', async (num) => {
         try {
-            if (GRUPOS_PERMITIDOS.includes(num.id) && num.action === 'add') {
-                for (let novoMembro of num.participants) await enviarBoasVindas(num.id, novoMembro);
+            if (num.id === GRUPO_PERMITIDO_ID && num.action === 'add') {
+                for (let novoMembro of num.participants) {
+                    await enviarBoasVindas(num.id, novoMembro);
+                }
             }
         } catch (err) {
             console.log("Erro no evento group-participants.update:", err);
         }
     });
 
+    // EVENTO 2: Notificações de sistema (Stub/Link)
     sock.ev.on('messages.upsert', async (chatUpdate) => {
         const mek = chatUpdate.messages[0];
         if (!mek.message) return;
@@ -174,10 +205,12 @@ async function startBot() {
         const participante = mek.key.participant || sender; 
         const isGroup = sender.endsWith('@g.us');
 
-        if (isGroup && GRUPOS_PERMITIDOS.includes(sender)) {
+        if (isGroup && sender === GRUPO_PERMITIDO_ID) {
             const isStubAdd = mek.messageStubType === 27 || mek.messageStubType === 28 || mek.messageStubType === 32;
             if (isStubAdd && mek.messageStubParameters && mek.messageStubParameters.length > 0) {
-                for (let novoMembro of mek.messageStubParameters) await enviarBoasVindas(sender, novoMembro);
+                for (let novoMembro of mek.messageStubParameters) {
+                    await enviarBoasVindas(sender, novoMembro);
+                }
             }
         }
 
@@ -194,7 +227,7 @@ async function startBot() {
             });
         };
 
-        // --- RETIFICAÇÃO: RESPOSTA EM PRIVADO (PV) ---
+        // --- RETIFICAÇÃO 1: RESPOSTA AUTOMÁTICA EM MENSAGEM PRIVADA (PV) ---
         if (!isGroup) {
             await sendMention(
                 `*CARO CLIENTE*\n\n` +
@@ -206,14 +239,7 @@ async function startBot() {
             return;
         }
 
-        // COMANDO DE TESTE PARA VER O ID DO GRUPO
-        if (text.toLowerCase() === '.id') {
-            await sock.sendMessage(sender, { text: `📌 **ID DESTE GRUPO:**\n\`${sender}\`` }, { quoted: mek });
-            return;
-        }
-
-        // Ignora grupos que não estejam autorizados
-        if (isGroup && !GRUPOS_PERMITIDOS.includes(sender)) {
+        if (isGroup && sender !== GRUPO_PERMITIDO_ID) {
             return;
         }
 
@@ -224,6 +250,7 @@ async function startBot() {
                 const participant = metadata.participants.find(p => p.id === userJid);
                 return participant && (participant.admin === 'admin' || participant.admin === 'superadmin');
             } catch (err) {
+                console.log("Erro ao verificar admin:", err);
                 return false;
             }
         }
@@ -578,8 +605,7 @@ async function startBot() {
                         pacote: pacoteMegas,
                         status: 'pendente',
                         sender: clienteAlvo,
-                        referencia: refConfirmada,
-                        grupo_origem: sender
+                        referencia: refConfirmada
                     });
 
                     const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -787,8 +813,7 @@ async function startBot() {
                     pacote: megasFinais,
                     status: 'pendente',
                     sender: participante,
-                    referencia: referenciaFinal,
-                    grupo_origem: sender
+                    referencia: referenciaFinal
                 });
 
                 const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
@@ -801,7 +826,7 @@ async function startBot() {
             return;
         }
 
-        // --- RETIFICAÇÃO: MODERAÇÃO DE IMAGENS E ÁUDIOS (APAGA MESMO COM TEXTO OU LEGENDA) ---
+        // --- RETIFICAÇÃO 2: MODERAÇÃO RÍGIDA DE IMAGENS E ÁUDIOS (APAGA MESMO COM LEGENDA OU TEXTO) ---
         const isImage = !!(
             mek.message.imageMessage || 
             mek.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
@@ -903,8 +928,7 @@ async function startBot() {
                     pacote: preco?.megas || 'N/A',
                     status: 'pendente',
                     sender: participante,
-                    referencia: referencia,
-                    grupo_origem: sender
+                    referencia: referencia
                 });
 
                 const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -971,8 +995,7 @@ async function startBot() {
                 pacote: preco?.megas || 'N/A',
                 status: 'pendente',
                 sender: participante,
-                referencia: mem.referencia,
-                grupo_origem: sender
+                referencia: mem.referencia
             });
 
             const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
@@ -1033,6 +1056,7 @@ function iniciarMonitorMacrodroid(sock) {
                     numLimpoMacro = numLimpoMacro.slice(-9);
                 }
 
+                // Varre todas as 10 tabelas de fila para encontrar o pedido correspondente
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
@@ -1086,10 +1110,10 @@ function iniciarMonitorMacrodroid(sock) {
                     referenciaTransacao = referenciaTransacao || 'N/A';
                     const clienteTag = clienteSender ? `@${clienteSender.split('@')[0]}` : '@Cliente';
 
-                    // Envia mensagem de conclusão diretamente no grupo onde o pedido foi feito
-                    const grupoDestino = pedidoFila.grupo_origem || GRUPOS_PERMITIDOS[0]; 
+                    const grupoJid = GRUPO_PERMITIDO_ID; 
                     const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
 
+                    // Formatação do nome da Fila para a mensagem final
                     let nomeFilaFormatado = "Fila Mãe";
                     if (tabelaEncontrada.includes('_')) {
                         const num = tabelaEncontrada.split('_').pop();
@@ -1098,12 +1122,12 @@ function iniciarMonitorMacrodroid(sock) {
 
                     const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Fila:* Finalizado com ${nomeFilaFormatado}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
-                    await sock.sendMessage(grupoDestino, { 
+                    await sock.sendMessage(grupoJid, { 
                         text: mensagemSucesso,
                         mentions: clienteSender ? [clienteSender] : []
                     });
 
-                    console.log(`Transação para o número ${pedidoFila.telefone} validada e enviada para o grupo ${grupoDestino}!`);
+                    console.log(`Transação para o número ${pedidoFila.telefone} validada na tabela ${tabelaEncontrada} com sucesso!`);
                 }
 
                 await supabase
