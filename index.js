@@ -88,7 +88,7 @@ async function inserirNaFilaAtiva(dadosPedido) {
     if (error) {
         console.log(`Erro ao inserir na tabela ${tabelaDestino}:`, error);
     } else {
-        console.log(`Pedido direcionado com sucesso para a tabela: ${tabelaDestino}`);
+        console.log(`Pedido direcionado com sucesso para la tabela: ${tabelaDestino}`);
     }
     return tabelaDestino;
 }
@@ -104,11 +104,13 @@ function formatarNomeDispositivo(nomeTabela) {
     return "Dispositivo 1";
 }
 
-// Função para verificar se o pacote é manual (7 dias, diamante, mensal, etc.)
+// Função estrita corrigida para verificar se o pacote é manual (apenas 7 dias, 30 dias, diamante ou mensal)
 function ehPacoteManual(nomePacote) {
     if (!nomePacote) return false;
     const p = nomePacote.toLowerCase();
-    return p.includes('dia') || p.includes('diamante') || p.includes('mensal') || p.includes('30') || p.includes('7');
+    // Exclui expressamente pacotes em MB comuns (como 700MB, 450MB, etc.)
+    if (p.includes('mb')) return false; 
+    return p.includes('diamante') || p.includes('mensal') || p.includes('30 dias') || p.includes('7 dias');
 }
 
 async function startBot() {
@@ -1156,7 +1158,6 @@ function iniciarMonitorMacrodroid(sock) {
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
-                // Procura em todas as tabelas de fila por um pedido pendente com o mesmo número
                 for (let tabela of TABELAS_FILA) {
                     const { data: pedidosFila } = await supabase
                         .from(tabela)
@@ -1166,16 +1167,13 @@ function iniciarMonitorMacrodroid(sock) {
 
                     if (!pedidosFila || pedidosFila.length === 0) continue;
 
-                    // Tenta encontrar o pedido correspondente por número de telefone (flexível) e pacote
                     const match = pedidosFila.find(p => {
                         let numFila = p.telefone.replace(/\D/g, '');
                         let matchNumero = numFila.includes(numLimpoMacro) || numLimpoMacro.includes(numFila);
-                        
-                        // Se o pacote do MacroDroid contiver o pacote da fila ou vice-versa, ou se a referência bater certo
                         let matchPacote = itemMacro.pacote.toLowerCase().includes(p.pacote.toLowerCase()) || p.pacote.toLowerCase().includes(itemMacro.pacote.toLowerCase());
                         let matchRef = itemMacro.referencia && p.referencia && (itemMacro.referencia.includes(p.referencia) || p.referencia.includes(itemMacro.referencia));
 
-                        return matchNumero && (matchPacote || matchRef || true); // Prioriza o número de telefone correspondente
+                        return matchNumero && (matchPacote || matchRef || true);
                     });
 
                     if (match) {
@@ -1185,7 +1183,6 @@ function iniciarMonitorMacrodroid(sock) {
                     }
                 }
 
-                // Se ainda não encontrou por pacote, pega o primeiro pedido pendente da fila mãe ou ativas que corresponda ao número
                 if (!pedidoFila) {
                     for (let tabela of TABELAS_FILA) {
                         const { data: pedidosFila } = await supabase
@@ -1251,7 +1248,6 @@ function iniciarMonitorMacrodroid(sock) {
                     console.log(`Transação para o número ${pedidoFila.telefone} validada na tabela ${tabelaEncontrada} com sucesso!`);
                 }
 
-                // Remove o item processado do histórico do MacroDroid
                 await supabase
                     .from('historico_concluidos')
                     .delete()
