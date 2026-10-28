@@ -93,6 +93,24 @@ async function inserirNaFilaAtiva(dadosPedido) {
     return tabelaDestino;
 }
 
+// Função auxiliar para converter o nome da tabela no formato de Dispositivo amigável
+function formatarNomeDispositivo(nomeTabela) {
+    if (!nomeTabela) return "Dispositivo 1";
+    if (nomeTabela === 'fila_macrodroid') return "Dispositivo 1";
+    if (nomeTabela.startsWith('fila_macrodroid_')) {
+        const num = nomeTabela.split('_').pop();
+        return `Dispositivo ${parseInt(num) + 1}`;
+    }
+    return "Dispositivo 1";
+}
+
+// Função para verificar se o pacote é manual (7 dias, diamante, mensal, etc.)
+function ehPacoteManual(nomePacote) {
+    if (!nomePacote) return false;
+    const p = nomePacote.toLowerCase();
+    return p.includes('dia') || p.includes('diamante') || p.includes('mensal') || p.includes('30') || p.includes('7');
+}
+
 async function startBot() {
     await carregarConfigFilas();
     
@@ -227,7 +245,7 @@ async function startBot() {
             });
         };
 
-        // --- RETIFICAÇÃO 1: RESPOSTA AUTOMÁTICA EM MENSAGEM PRIVADA (PV) ---
+        // --- RESPOSTA AUTOMÁTICA EM MENSAGEM PRIVADA (PV) ---
         if (!isGroup) {
             await sendMention(
                 `*CARO CLIENTE*\n\n` +
@@ -340,7 +358,7 @@ async function startBot() {
 
             if (stb.step === 'escolher_tabela') {
                 const op = parseInt(text);
-                const tabelas = ['tabela_precos', 'comandos_customizados', 'transecoes_pendentes', 'fila_macrodroid', 'memoria_aguardando'];
+                const tabelas = ['tabela_precos', 'comandos_customizados', 'transecoes_pendentes', 'fila_macrodroid', 'memoria_aguardando', 'pagamentos'];
                 
                 if (isNaN(op) || op < 1 || op > tabelas.length) {
                     await sock.sendMessage(sender, { text: `⚠️ Opção inválida. Responda com um número de 1 a ${tabelas.length}.` }, { quoted: mek });
@@ -349,7 +367,7 @@ async function startBot() {
 
                 stb.tabelaSelecionada = tabelas[op - 1];
                 stb.step = 'informar_coluna1';
-                await sock.sendMessage(sender, { text: `📊 Tabela selecionada: *${stb.tabelaSelecionada}*\n\nDigite o nome da **primeira coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`megas=1GB\` ou \`valor=100\`` }, { quoted: mek });
+                await sock.sendMessage(sender, { text: `📊 Tabela selecionada: *${stb.tabelaSelecionada}*\n\nDigite o nome da **primeira coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`numero=856597911\` ou \`nome=ATIA\`` }, { quoted: mek });
                 return;
             }
 
@@ -371,7 +389,7 @@ async function startBot() {
             if (stb.step === 'deseja_coluna2') {
                 if (text === '1') {
                     stb.step = 'informar_coluna2';
-                    await sock.sendMessage(sender, { text: `Digite o nome da **segunda coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`valor=50\`` }, { quoted: mek });
+                    await sock.sendMessage(sender, { text: `Digite o nome da **segunda coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`nome=ATIA\`` }, { quoted: mek });
                     return;
                 } else if (text === '2') {
                     const payload = {};
@@ -477,7 +495,7 @@ async function startBot() {
 
             const comandoInput = text.trim().toLowerCase();
 
-            // --- COMANDOS DE CONTROLO DAS FILAS (.ativafilaX, .desativafilaX, .onfilaX) ---
+            // --- COMANDOS DE CONTROLO DAS FILAS ---
             if (comandoInput.startsWith('.ativafila') || comandoInput.startsWith('.desativafila') || comandoInput.startsWith('.onfila')) {
                 const matchNum = comandoInput.match(/\d+/);
                 if (!matchNum) {
@@ -593,12 +611,22 @@ async function startBot() {
                         valor: valorConfirmado, 
                         referencia: refConfirmada, 
                         status: 'usado',
-                        usado_por: usuarioTag,
+                        usado_por: `@${clienteAlvo.split('@')[0]}`,
                         data_uso: new Date().toISOString()
                     }]);
 
                     const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorConfirmado).maybeSingle();
                     const pacoteMegas = (preco && preco.megas) ? preco.megas : 'N/A';
+
+                    if (ehPacoteManual(pacoteMegas)) {
+                        const isDiamante = pacoteMegas.toLowerCase().includes('diamante');
+                        const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                        
+                        const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n💎 Pacote: ${pacoteMegas}\n🦄 Referência: ${refConfirmada}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+
+                        await sock.sendMessage(sender, { text: `${msgManual}\n\n@${clienteAlvo.split('@')[0]}`, mentions: [clienteAlvo] });
+                        return;
+                    }
 
                     await inserirNaFilaAtiva({
                         telefone: numeroVodacom,
@@ -727,7 +755,7 @@ async function startBot() {
                     step: 'escolher_tabela'
                 };
 
-                const msgTabelas = `📋 **ADICIONAR DADOS NO SUPABASE (.addtb)**\n\nEscolha a tabela que deseja modificar:\n\n1️⃣ \`tabela_precos\`\n2️⃣ \`comandos_customizados\`\n3️⃣ \`transecoes_pendentes\`\n4️⃣ \`fila_macrodroid\`\n5️⃣ \`memoria_aguardando\`\n\n*(Responda enviando o número da opção desejada)*`;
+                const msgTabelas = `📋 **ADICIONAR DADOS NO SUPABASE (.addtb)**\n\nEscolha a tabela que deseja modificar:\n\n1️⃣ \`tabela_precos\`\n2️⃣ \`comandos_customizados\`\n3️⃣ \`transecoes_pendentes\`\n4️⃣ \`fila_macrodroid\`\n5️⃣ \`memoria_aguardando\`\n6️⃣ \`pagamentos\`\n\n*(Responda enviando o número da opção desejada)*`;
 
                 await sock.sendMessage(sender, { text: msgTabelas }, { quoted: mek });
                 return;
@@ -808,6 +836,16 @@ async function startBot() {
                     data_uso: new Date().toISOString()
                 }]);
 
+                if (ehPacoteManual(megasFinais)) {
+                    const isDiamante = megasFinais.toLowerCase().includes('diamante');
+                    const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                    
+                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${telefoneSolicitado}\n💎 Pacote: ${megasFinais}\n🦄 Referência: ${referenciaFinal}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+
+                    await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
+                    return;
+                }
+
                 await inserirNaFilaAtiva({
                     telefone: telefoneSolicitado,
                     pacote: megasFinais,
@@ -826,7 +864,7 @@ async function startBot() {
             return;
         }
 
-        // --- RETIFICAÇÃO 2: MODERAÇÃO RÍGIDA DE IMAGENS E ÁUDIOS (APAGA MESMO COM LEGENDA OU TEXTO) ---
+        // --- MODERAÇÃO RÍGIDA DE IMAGENS E ÁUDIOS ---
         const isImage = !!(
             mek.message.imageMessage || 
             mek.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage ||
@@ -871,6 +909,32 @@ async function startBot() {
         }
 
         if (text.includes("Confirmado") || text.includes("ID da transacao")) {
+            // --- VALIDAÇÃO DO NÚMERO DE DESTINO NA TABELA 'pagamentos' ---
+            let numDestino = null;
+            if (text.includes("ID da transacao")) {
+                const matchEmola = text.match(/para\s+conta\s+(\d+)/i);
+                if (matchEmola) numDestino = matchEmola[1];
+            } else if (text.includes("Confirmado")) {
+                const matchMpesa = text.match(/para\s+(\d+)\s*-/i);
+                if (matchMpesa) numDestino = matchMpesa[1];
+            }
+
+            if (numDestino) {
+                const { data: pagamentoValido } = await supabase
+                    .from('pagamentos')
+                    .select('*')
+                    .eq('numero', numDestino)
+                    .maybeSingle();
+
+                if (!pagamentoValido) {
+                    await sock.sendMessage(sender, {
+                        text: `❌ ${usuarioTag} *Comprovativo Rejeitado!*\n\n⚠️ O número de destino (\`${numDestino}\`) para o qual foi feita a transferência não pertence aos números oficiais autorizados deste grupo.\n\nVerifique os dados corretos de pagamento na tabela do grupo.`,
+                        mentions: [participante]
+                    });
+                    return;
+                }
+            }
+
             let referencia = text.match(/(Confirmado|ID da transacao)[:\s]+([A-Z0-9.]+)/i)?.[2] || "N/A";
             referencia = referencia.replace(/\.$/, "").trim();
 
@@ -885,6 +949,7 @@ async function startBot() {
                 }
             }
 
+            // --- CORREÇÃO DA MENÇÃO DE QUEM JÁ USOU O COMPROVATIVO ---
             const { data: jaUsado } = await supabase
                 .from('memoria_aguardando')
                 .select('*')
@@ -892,8 +957,16 @@ async function startBot() {
                 .maybeSingle();
             
             if (jaUsado) {
-                const dataFormatada = new Date(jaUsado.data_uso || Date.now()).toLocaleString('pt-PT');
-                await sendMention(`❌ ${usuarioTag} *Comprovativo já utilizado!*\n\n👤 *Utilizado por:* ${jaUsado.usado_por || 'Desconhecido'}\n📅 *Data:* ${dataFormatada}\n\nEste comprovativo não pode ser processado novamente.`);
+                let jidInjetar = jaUsado.sender || participante;
+                
+                // Extrai o número limpo para construir a tag bonita
+                let numFormatadoTag = jidInjetar.split('@')[0].split(':')[0].replace(/\D/g, '');
+                let tagFormatada = `@${numFormatadoTag}`;
+
+                await sock.sendMessage(sender, {
+                    text: `❌ ${usuarioTag} Comprovativo já utilizado!\n\n👤 Utilizado por: ${tagFormatada}\n📅 Data: ${new Date(jaUsado.data_uso || Date.now()).toLocaleString('pt-PT')}\n\nEste comprovativo não pode ser processado novamente.`,
+                    mentions: [participante, jidInjetar]
+                });
                 return;
             }
 
@@ -922,16 +995,27 @@ async function startBot() {
                 await supabase.from('transecoes_pendentes').update({ status: 'processado' }).eq('id', transacaoReal.id);
 
                 const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', transacaoReal.valor).maybeSingle();
+                const pacoteFinal = preco?.megas || 'N/A';
+
+                if (ehPacoteManual(pacoteFinal)) {
+                    const isDiamante = pacoteFinal.toLowerCase().includes('diamante');
+                    const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                    
+                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n💎 Pacote: ${pacoteFinal}\n🦄 Referência: ${referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+
+                    await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
+                    return;
+                }
                 
                 await inserirNaFilaAtiva({
                     telefone: numeroVodacom,
-                    pacote: preco?.megas || 'N/A',
+                    pacote: pacoteFinal,
                     status: 'pendente',
                     sender: participante,
                     referencia: referencia
                 });
 
-                const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
+                const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteFinal}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
                 await sendMention(msg);
                 return;
             }
@@ -989,16 +1073,27 @@ async function startBot() {
             }).eq('referencia', mem.referencia);
 
             const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', mem.valor).maybeSingle();
+            const pacoteFinal = preco?.megas || 'N/A';
+
+            if (ehPacoteManual(pacoteFinal)) {
+                const isDiamante = pacoteFinal.toLowerCase().includes('diamante');
+                const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                
+                const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroLimpoText}\n💎 Pacote: ${pacoteFinal}\n🦄 Referência: ${mem.referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+
+                await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
+                return;
+            }
             
             await inserirNaFilaAtiva({
                 telefone: numeroLimpoText,
-                pacote: preco?.megas || 'N/A',
+                pacote: pacoteFinal,
                 status: 'pendente',
                 sender: participante,
                 referencia: mem.referencia
             });
 
-            const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${preco?.megas || 'N/A'}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
+            const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${pacoteFinal}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
             await sendMention(msg);
             return;
         }
@@ -1056,7 +1151,6 @@ function iniciarMonitorMacrodroid(sock) {
                     numLimpoMacro = numLimpoMacro.slice(-9);
                 }
 
-                // Varre todas as 10 tabelas de fila para encontrar o pedido correspondente
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
@@ -1113,14 +1207,9 @@ function iniciarMonitorMacrodroid(sock) {
                     const grupoJid = GRUPO_PERMITIDO_ID; 
                     const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
 
-                    // Formatação do nome da Fila para a mensagem final
-                    let nomeFilaFormatado = "Fila Mãe";
-                    if (tabelaEncontrada.includes('_')) {
-                        const num = tabelaEncontrada.split('_').pop();
-                        nomeFilaFormatado = `Fila ${num}`;
-                    }
+                    const nomeDispositivoFinal = formatarNomeDispositivo(tabelaEncontrada);
 
-                    const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Fila:* Finalizado com ${nomeFilaFormatado}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
+                    const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
                     await sock.sendMessage(grupoJid, { 
                         text: mensagemSucesso,
