@@ -104,11 +104,12 @@ function formatarNomeDispositivo(nomeTabela) {
     return "Dispositivo 1";
 }
 
-// Função para verificar se o pacote é manual (7 dias, diamante, mensal, etc.)
+// Função estrita para verificar se o pacote é manual (apenas 7 dias, 30 dias, diamante ou mensal)
 function ehPacoteManual(nomePacote) {
     if (!nomePacote) return false;
     const p = nomePacote.toLowerCase();
-    return p.includes('dia') || p.includes('diamante') || p.includes('mensal') || p.includes('30') || p.includes('7');
+    if (p.includes('mb')) return false; 
+    return p.includes('diamante') || p.includes('mensal') || p.includes('30 dias') || p.includes('7 dias');
 }
 
 async function startBot() {
@@ -1136,7 +1137,7 @@ async function startBot() {
 }
 
 // ==========================================
-// MONITOR DO MACRODROID OTIMIZADO E FLEXÍVEL
+// MONITOR DO MACRODROID BLINDADO (INDEPENDENTE DE PENDENTE)
 // ==========================================
 function iniciarMonitorMacrodroid(sock) {
     setInterval(async () => {
@@ -1148,7 +1149,7 @@ function iniciarMonitorMacrodroid(sock) {
             if (errMacro || !concluidosMacro || concluidosMacro.length === 0) return;
 
             for (let itemMacro of concluidosMacro) {
-                let numLimpoMacro = itemMacro.telefone.replace(/\D/g, '');
+                let numLimpoMacro = itemMacro.telefone ? itemMacro.telefone.replace(/\D/g, '') : '';
                 if (numLimpoMacro.length > 9) {
                     numLimpoMacro = numLimpoMacro.slice(-9);
                 }
@@ -1156,102 +1157,102 @@ function iniciarMonitorMacrodroid(sock) {
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
-                // Procura em todas as tabelas de fila por um pedido pendente com o mesmo número
-                for (let tabela of TABELAS_FILA) {
-                    const { data: pedidosFila } = await supabase
-                        .from(tabela)
-                        .select('*')
-                        .eq('status', 'pendente')
-                        .order('id', { ascending: true });
-
-                    if (!pedidosFila || pedidosFila.length === 0) continue;
-
-                    // Tenta encontrar o pedido correspondente por número de telefone (flexível) e pacote
-                    const match = pedidosFila.find(p => {
-                        let numFila = p.telefone.replace(/\D/g, '');
-                        let matchNumero = numFila.includes(numLimpoMacro) || numLimpoMacro.includes(numFila);
-                        
-                        // Se o pacote do MacroDroid contiver o pacote da fila ou vice-versa, ou se a referência bater certo
-                        let matchPacote = itemMacro.pacote.toLowerCase().includes(p.pacote.toLowerCase()) || p.pacote.toLowerCase().includes(itemMacro.pacote.toLowerCase());
-                        let matchRef = itemMacro.referencia && p.referencia && (itemMacro.referencia.includes(p.referencia) || p.referencia.includes(itemMacro.referencia));
-
-                        return matchNumero && (matchPacote || matchRef || true); // Prioriza o número de telefone correspondente
-                    });
-
-                    if (match) {
-                        pedidoFila = match;
-                        tabelaEncontrada = tabela;
-                        break;
-                    }
-                }
-
-                // Se ainda não encontrou por pacote, pega o primeiro pedido pendente da fila mãe ou ativas que corresponda ao número
-                if (!pedidoFila) {
+                // 1. Tenta encontrar prioritariamente pela REFERÊNCIA exata que o MacroDroid enviou
+                if (itemMacro.referencia) {
+                    let refLimpa = itemMacro.referencia.trim();
                     for (let tabela of TABELAS_FILA) {
-                        const { data: pedidosFila } = await supabase
+                        // Procura sem restrição de status (pendente ou já concluído) para garantir que apanha sempre
+                        const { data: matchRef } = await supabase
                             .from(tabela)
                             .select('*')
-                            .eq('status', 'pendente')
-                            .order('id', { ascending: true });
+                            .ilike('referencia', `%${refLimpa}%`)
+                            .maybeSingle();
 
-                        if (!pedidosFila) continue;
-
-                        const matchNumOnly = pedidosFila.find(p => {
-                            let numFila = p.telefone.replace(/\D/g, '');
-                            return numFila.includes(numLimpoMacro) || numLimpoMacro.includes(numFila);
-                        });
-
-                        if (matchNumOnly) {
-                            pedidoFila = matchNumOnly;
+                        if (matchRef) {
+                            pedidoFila = matchRef;
                             tabelaEncontrada = tabela;
                             break;
                         }
                     }
                 }
 
-                if (pedidoFila && tabelaEncontrada) {
+                // 2. Se não encontrou por referência, procura pelo número de telefone nas tabelas
+                if (!pedidoFila && numLimpoMacro) {
+                    for (let tabela of TABELAS_FILA) {
+                        const { data: pedidosFila } = await supabase
+                            .from(tabela)
+                            .select('*')
+                            .order('id', { ascending: false })
+                            .limit(10);
+
+                        if (!pedidosFila || pedidosFila.length === 0) continue;
+
+                        const matchNum = pedidosFila.find(p => {
+                            let numFila = p.telefone ? p.telefone.replace(/\D/g, '') : '';
+                            return numFila.includes(numLimpoMacro) || numLimpoMacro.includes(numFila);
+                        });
+
+                        if (matchNum) {
+                            pedidoFila = matchNum;
+                            tabelaEncontrada = tabela;
+                            break;
+                        }
+                    }
+                }
+
+                // Se ainda não encontrou registo na fila, cria um objeto base com os dados que o MacroDroid mandou diretamente!
+                if (!pedidoFila) {
+                    pedidoFila = {
+                        telefone: itemMacro.telefone || numLimpoMacro,
+                        pacote: itemMacro.pacote || '1000MB',
+                        referencia: itemMacro.referencia || 'N/A',
+                        sender: itemMacro.sender || null
+                    };
+                    tabelaEncontrada = 'fila_macrodroid';
+                } else {
+                    // Garante que atualiza o status para concluído na tabela correspondente
                     await supabase
                         .from(tabelaEncontrada)
                         .update({ status: 'concluido' })
                         .eq('id', pedidoFila.id);
-
-                    let referenciaTransacao = pedidoFila.referencia || itemMacro.referencia;
-                    let clienteSender = pedidoFila.sender;
-
-                    if (!referenciaTransacao || !clienteSender) {
-                        const { data: dadosMemoria } = await supabase
-                            .from('memoria_aguardando')
-                            .select('referencia, sender')
-                            .eq('status', 'usado')
-                            .order('id', { ascending: false })
-                            .limit(1)
-                            .maybeSingle();
-
-                        if (dadosMemoria) {
-                            referenciaTransacao = referenciaTransacao || dadosMemoria.referencia;
-                            clienteSender = clienteSender || dadosMemoria.sender;
-                        }
-                    }
-
-                    referenciaTransacao = referenciaTransacao || 'N/A';
-                    const clienteTag = clienteSender ? `@${clienteSender.split('@')[0]}` : '@Cliente';
-
-                    const grupoJid = GRUPO_PERMITIDO_ID; 
-                    const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
-
-                    const nomeDispositivoFinal = formatarNomeDispositivo(tabelaEncontrada);
-
-                    const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
-
-                    await sock.sendMessage(grupoJid, { 
-                        text: mensagemSucesso,
-                        mentions: clienteSender ? [clienteSender] : []
-                    });
-
-                    console.log(`Transação para o número ${pedidoFila.telefone} validada na tabela ${tabelaEncontrada} com sucesso!`);
                 }
 
-                // Remove o item processado do histórico do MacroDroid
+                // Recupera o sender (cliente) de forma blindada
+                let clienteSender = itemMacro.sender || pedidoFila.sender;
+
+                if (!clienteSender && pedidoFila.referencia) {
+                    const { data: dadosMemoria } = await supabase
+                        .from('memoria_aguardando')
+                        .select('sender')
+                        .eq('referencia', pedidoFila.referencia)
+                        .maybeSingle();
+
+                    if (dadosMemoria) {
+                        clienteSender = dadosMemoria.sender;
+                    }
+                }
+
+                let referenciaTransacao = pedidoFila.referencia || itemMacro.referencia || 'N/A';
+                const clienteTag = clienteSender ? `@${clienteSender.split('@')[0]}` : '@Cliente';
+
+                const grupoJid = GRUPO_PERMITIDO_ID; 
+                const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
+
+                const nomeDispositivoFinal = formatarNomeDispositivo(tabelaEncontrada);
+
+                const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
+
+                let mentionsList = clienteSender ? [clienteSender] : [];
+
+                // Envia obrigatoriamente a mensagem de sucesso no grupo
+                await sock.sendMessage(grupoJid, { 
+                    text: mensagemSucesso,
+                    mentions: mentionsList
+                });
+
+                console.log(`Transação para o número ${pedidoFila.telefone} validada e mensagem enviada com sucesso!`);
+
+                // Remove o item processado do histórico do MacroDroid para limpar a tabela
                 await supabase
                     .from('historico_concluidos')
                     .delete()
