@@ -637,7 +637,7 @@ async function startBot() {
                         referencia: refConfirmada
                     });
 
-                    const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa a transferência_`;
+                    const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa la transferência_`;
                     await sendMention(msg);
                     return;
                 }
@@ -1137,7 +1137,7 @@ async function startBot() {
 }
 
 // ==========================================
-// MONITOR DO MACRODROID BLINDADO (ENVIO SEGURO)
+// MONITOR DO MACRODROID DIRETO E INFALÍVEL
 // ==========================================
 function iniciarMonitorMacrodroid(sock) {
     setInterval(async () => {
@@ -1149,80 +1149,36 @@ function iniciarMonitorMacrodroid(sock) {
             if (errMacro || !concluidosMacro || concluidosMacro.length === 0) return;
 
             for (let itemMacro of concluidosMacro) {
-                let numLimpoMacro = itemMacro.telefone ? itemMacro.telefone.replace(/\D/g, '') : '';
-                if (numLimpoMacro.length > 9) {
-                    numLimpoMacro = numLimpoMacro.slice(-9);
-                }
-
-                let pedidoFila = null;
-                let tabelaEncontrada = '';
-
-                // 1. Tenta encontrar prioritariamente pela REFERÊNCIA exata enviada pelo MacroDroid
+                // 1. Atualiza o status para concluído nas filas (procurando por referência ou telefone, sem exigir status 'pendente')
+                let tabelaEncontrada = 'fila_macrodroid';
                 if (itemMacro.referencia) {
                     let refLimpa = itemMacro.referencia.trim();
                     for (let tabela of TABELAS_FILA) {
-                        const { data: matchRef } = await supabase
+                        const { data: updateRes } = await supabase
                             .from(tabela)
-                            .select('*')
+                            .update({ status: 'concluido' })
                             .ilike('referencia', `%${refLimpa}%`)
-                            .maybeSingle();
+                            .select();
 
-                        if (matchRef) {
-                            pedidoFila = matchRef;
+                        if (updateRes && updateRes.length > 0) {
                             tabelaEncontrada = tabela;
                             break;
                         }
                     }
                 }
 
-                // 2. Se não encontrou por referência, procura pelo número nas tabelas
-                if (!pedidoFila && numLimpoMacro) {
-                    for (let tabela of TABELAS_FILA) {
-                        const { data: pedidosFila } = await supabase
-                            .from(tabela)
-                            .select('*')
-                            .order('id', { ascending: false })
-                            .limit(10);
+                // 2. Recolhe os dados diretamente da linha enviada pelo MacroDroid
+                let refTransacao = itemMacro.referencia || 'N/A';
+                let telTransacao = itemMacro.telefone || 'N/A';
+                let pacTransacao = itemMacro.pacote || 'N/A';
+                let clienteSender = itemMacro.sender || null;
 
-                        if (!pedidosFila || pedidosFila.length === 0) continue;
-
-                        const matchNum = pedidosFila.find(p => {
-                            let numFila = p.telefone ? p.telefone.replace(/\D/g, '') : '';
-                            return numFila.includes(numLimpoMacro) || numLimpoMacro.includes(numFila);
-                        });
-
-                        if (matchNum) {
-                            pedidoFila = matchNum;
-                            tabelaEncontrada = tabela;
-                            break;
-                        }
-                    }
-                }
-
-                // Se não encontrar na fila, monta com os dados que vieram do MacroDroid
-                if (!pedidoFila) {
-                    pedidoFila = {
-                        telefone: itemMacro.telefone || numLimpoMacro,
-                        pacote: itemMacro.pacote || '1000MB',
-                        referencia: itemMacro.referencia || 'N/A',
-                        sender: itemMacro.sender || null
-                    };
-                    tabelaEncontrada = 'fila_macrodroid';
-                } else {
-                    await supabase
-                        .from(tabelaEncontrada)
-                        .update({ status: 'concluido' })
-                        .eq('id', pedidoFila.id);
-                }
-
-                // Recupera o sender (cliente)
-                let clienteSender = itemMacro.sender || pedidoFila.sender;
-
-                if (!clienteSender && pedidoFila.referencia) {
+                // Se faltar o sender, recupera da memória com base na referência
+                if (!clienteSender && refTransacao !== 'N/A') {
                     const { data: dadosMemoria } = await supabase
                         .from('memoria_aguardando')
                         .select('sender')
-                        .eq('referencia', pedidoFila.referencia)
+                        .eq('referencia', refTransacao)
                         .maybeSingle();
 
                     if (dadosMemoria) {
@@ -1230,26 +1186,24 @@ function iniciarMonitorMacrodroid(sock) {
                     }
                 }
 
-                let referenciaTransacao = pedidoFila.referencia || itemMacro.referencia || 'N/A';
                 const clienteTag = clienteSender ? `@${clienteSender.split('@')[0]}` : '@Cliente';
-
                 const grupoJid = GRUPO_PERMITIDO_ID; 
                 const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
                 const nomeDispositivoFinal = formatarNomeDispositivo(tabelaEncontrada);
 
-                const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
+                const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${refTransacao}\n📱 *Telefone:* ${telTransacao}\n📊 *Pacote:* ${pacTransacao}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
                 let mentionsList = clienteSender ? [clienteSender] : [];
 
-                // 1. PRIMEIRO envia a mensagem de sucesso de forma segura para o grupo
+                // 3. Envia obrigatoriamente a mensagem de conclusão no grupo do WhatsApp
                 await sock.sendMessage(grupoJid, { 
                     text: mensagemSucesso,
                     mentions: mentionsList
                 });
 
-                console.log(`Transação para o número ${pedidoFila.telefone} validada e mensagem enviada com sucesso!`);
+                console.log(`Transação ${refTransacao} notificada com sucesso no grupo!`);
 
-                // 2. SÓ DEPOIS de enviar a mensagem é que remove o item do histórico do MacroDroid
+                // 4. Remove o item processado da tabela historico_concluidos
                 await supabase
                     .from('historico_concluidos')
                     .delete()
@@ -1258,7 +1212,7 @@ function iniciarMonitorMacrodroid(sock) {
         } catch (err) {
             console.log("Erro no monitor do MacroDroid:", err);
         }
-    }, 5000);
+    }, 4000);
 }
 
 startBot();
