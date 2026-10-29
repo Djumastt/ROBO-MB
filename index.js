@@ -1137,7 +1137,7 @@ async function startBot() {
 }
 
 // ==========================================
-// MONITOR DO MACRODROID BLINDADO (INDEPENDENTE DE PENDENTE)
+// MONITOR DO MACRODROID BLINDADO (ENVIO SEGURO)
 // ==========================================
 function iniciarMonitorMacrodroid(sock) {
     setInterval(async () => {
@@ -1157,11 +1157,10 @@ function iniciarMonitorMacrodroid(sock) {
                 let pedidoFila = null;
                 let tabelaEncontrada = '';
 
-                // 1. Tenta encontrar prioritariamente pela REFERÊNCIA exata que o MacroDroid enviou
+                // 1. Tenta encontrar prioritariamente pela REFERÊNCIA exata enviada pelo MacroDroid
                 if (itemMacro.referencia) {
                     let refLimpa = itemMacro.referencia.trim();
                     for (let tabela of TABELAS_FILA) {
-                        // Procura sem restrição de status (pendente ou já concluído) para garantir que apanha sempre
                         const { data: matchRef } = await supabase
                             .from(tabela)
                             .select('*')
@@ -1176,7 +1175,7 @@ function iniciarMonitorMacrodroid(sock) {
                     }
                 }
 
-                // 2. Se não encontrou por referência, procura pelo número de telefone nas tabelas
+                // 2. Se não encontrou por referência, procura pelo número nas tabelas
                 if (!pedidoFila && numLimpoMacro) {
                     for (let tabela of TABELAS_FILA) {
                         const { data: pedidosFila } = await supabase
@@ -1200,7 +1199,7 @@ function iniciarMonitorMacrodroid(sock) {
                     }
                 }
 
-                // Se ainda não encontrou registo na fila, cria um objeto base com os dados que o MacroDroid mandou diretamente!
+                // Se não encontrar na fila, monta com os dados que vieram do MacroDroid
                 if (!pedidoFila) {
                     pedidoFila = {
                         telefone: itemMacro.telefone || numLimpoMacro,
@@ -1210,14 +1209,13 @@ function iniciarMonitorMacrodroid(sock) {
                     };
                     tabelaEncontrada = 'fila_macrodroid';
                 } else {
-                    // Garante que atualiza o status para concluído na tabela correspondente
                     await supabase
                         .from(tabelaEncontrada)
                         .update({ status: 'concluido' })
                         .eq('id', pedidoFila.id);
                 }
 
-                // Recupera o sender (cliente) de forma blindada
+                // Recupera o sender (cliente)
                 let clienteSender = itemMacro.sender || pedidoFila.sender;
 
                 if (!clienteSender && pedidoFila.referencia) {
@@ -1237,14 +1235,13 @@ function iniciarMonitorMacrodroid(sock) {
 
                 const grupoJid = GRUPO_PERMITIDO_ID; 
                 const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
-
                 const nomeDispositivoFinal = formatarNomeDispositivo(tabelaEncontrada);
 
                 const mensagemSucesso = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referenciaTransacao}\n📱 *Telefone:* ${pedidoFila.telefone}\n📊 *Pacote:* ${pedidoFila.pacote}\n⏰ *Data/Hora:* ${dataHoraAtual}\n👤 *Cliente:* ${clienteTag}\n📱 *Finalizado:* ${nomeDispositivoFinal}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
                 let mentionsList = clienteSender ? [clienteSender] : [];
 
-                // Envia obrigatoriamente a mensagem de sucesso no grupo
+                // 1. PRIMEIRO envia a mensagem de sucesso de forma segura para o grupo
                 await sock.sendMessage(grupoJid, { 
                     text: mensagemSucesso,
                     mentions: mentionsList
@@ -1252,7 +1249,7 @@ function iniciarMonitorMacrodroid(sock) {
 
                 console.log(`Transação para o número ${pedidoFila.telefone} validada e mensagem enviada com sucesso!`);
 
-                // Remove o item processado do histórico do MacroDroid para limpar a tabela
+                // 2. SÓ DEPOIS de enviar a mensagem é que remove o item do histórico do MacroDroid
                 await supabase
                     .from('historico_concluidos')
                     .delete()
