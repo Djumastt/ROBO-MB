@@ -104,12 +104,77 @@ function formatarNomeDispositivo(nomeTabela) {
     return "Dispositivo 1";
 }
 
-// Função estrita para verificar se o pacote é manual (apenas 7 dias, 30 dias, diamante ou mensal)
-function ehPacoteManual(nomePacote) {
-    if (!nomePacote) return false;
-    const p = nomePacote.toLowerCase();
-    if (p.includes('mb')) return false; 
-    return p.includes('diamante') || p.includes('mensal') || p.includes('30 dias') || p.includes('7 dias');
+// ==========================================
+// FUNÇÃO CENTRALIZADA DE PROCESSAMENTO DE PACOTE (DIAMANTES, MENSAIS, SEMANAIS, PRECOS)
+// ==========================================
+async function identificarEProcessarPacote(valorPagamento, pacoteInput) {
+    let dadosEncontrados = null;
+    let tipoOferta = 'normal';
+
+    // 1. Tenta procurar na tabela 'diamantes' (por valor ou por nome)
+    if (valorPagamento) {
+        const { data: dDiamante } = await supabase.from('diamantes').select('*').eq('valor', valorPagamento).maybeSingle();
+        if (dDiamante) dadosEncontrados = dDiamante;
+    }
+    if (!dadosEncontrados && pacoteInput) {
+        const { data: dDiamante } = await supabase.from('diamantes').select('*').ilike('megas', `%${pacoteInput}%`).maybeSingle();
+        if (dDiamante) dadosEncontrados = dDiamante;
+    }
+    if (dadosEncontrados) tipoOferta = 'diamante';
+
+    // 2. Tenta procurar na tabela 'mensais'
+    if (!dadosEncontrados && valorPagamento) {
+        const { data: dMensal } = await supabase.from('mensais').select('*').eq('valor', valorPagamento).maybeSingle();
+        if (dMensal) dadosEncontrados = dMensal;
+    }
+    if (!dadosEncontrados && pacoteInput) {
+        const { data: dMensal } = await supabase.from('mensais').select('*').ilike('megas', `%${pacoteInput}%`).maybeSingle();
+        if (dMensal) dadosEncontrados = dMensal;
+    }
+    if (dadosEncontrados && tipoOferta === 'normal') tipoOferta = 'mensal';
+
+    // 3. Tenta procurar na tabela 'semanais'
+    if (!dadosEncontrados && valorPagamento) {
+        const { data: dSemanal } = await supabase.from('semanais').select('*').eq('valor', valorPagamento).maybeSingle();
+        if (dSemanal) dadosEncontrados = dSemanal;
+    }
+    if (!dadosEncontrados && pacoteInput) {
+        const { data: dSemanal } = await supabase.from('semanais').select('*').ilike('megas', `%${pacoteInput}%`).maybeSingle();
+        if (dSemanal) dadosEncontrados = dSemanal;
+    }
+    if (dadosEncontrados && tipoOferta === 'normal') tipoOferta = 'semanal';
+
+    // 4. Se não estiver em nenhuma das anteriores, procura na 'tabela_precos' normal
+    if (!dadosEncontrados) {
+        if (valorPagamento) {
+            const { data: dPreco } = await supabase.from('tabela_precos').select('*').eq('valor', valorPagamento).maybeSingle();
+            if (dPreco) dadosEncontrados = dPreco;
+        }
+        if (!dadosEncontrados && pacoteInput) {
+            const { data: dPreco } = await supabase.from('tabela_precos').select('*').ilike('megas', `%${pacoteInput}%`).maybeSingle();
+            if (dPreco) dadosEncontrados = dPreco;
+        }
+        if (dadosEncontrados) tipoOferta = 'normal';
+    }
+
+    // Se ainda assim não encontrar nada, retorna o padrão informado
+    const nomePacoteFinal = dadosEncontrados?.megas || pacoteInput || 'N/A';
+    const valorFinal = dadosEncontrados?.valor || valorPagamento || 0;
+
+    // Se encontrou em alguma das tabelas manuais, define o tipo correspondente
+    if (!tipoOferta || tipoOferta === 'normal') {
+        // Validação extra por nome caso não tenha encontrado pelo valor exato nas tabelas específicas
+        const pLower = nomePacoteFinal.toLowerCase();
+        if (pLower.includes('diamante')) tipoOferta = 'diamante';
+        else if (pLower.includes('mensal') || pLower.includes('30 dias')) tipoOferta = 'mensal';
+        else if (pLower.includes('semanal') || pLower.includes('7 dias')) tipoOferta = 'semanal';
+    }
+
+    return {
+        megas: nomePacoteFinal,
+        valor: valorFinal,
+        tipo: tipoOferta // 'diamante', 'mensal', 'semanal', 'normal'
+    };
 }
 
 async function startBot() {
@@ -159,7 +224,7 @@ async function startBot() {
 
     iniciarMonitorMacrodroid(sock);
 
-    // Função centralizada e corrigida para enviar boas-vindas
+    // Função centralizada para enviar boas-vindas
     const membrosCumprimentados = new Set();
     async function enviarBoasVindas(grupoId, membroInput) {
         let jidFinal = "";
@@ -359,7 +424,7 @@ async function startBot() {
 
             if (stb.step === 'escolher_tabela') {
                 const op = parseInt(text);
-                const tabelas = ['tabela_precos', 'comandos_customizados', 'transecoes_pendentes', 'fila_macrodroid', 'memoria_aguardando', 'pagamentos'];
+                const tabelas = ['tabela_precos', 'semanais', 'mensais', 'diamantes', 'comandos_customizados', 'transecoes_pendentes', 'fila_macrodroid', 'memoria_aguardando', 'pagamentos'];
                 
                 if (isNaN(op) || op < 1 || op > tabelas.length) {
                     await sock.sendMessage(sender, { text: `⚠️ Opção inválida. Responda com um número de 1 a ${tabelas.length}.` }, { quoted: mek });
@@ -368,7 +433,7 @@ async function startBot() {
 
                 stb.tabelaSelecionada = tabelas[op - 1];
                 stb.step = 'informar_coluna1';
-                await sock.sendMessage(sender, { text: `📊 Tabela selecionada: *${stb.tabelaSelecionada}*\n\nDigite o nome da **primeira coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`numero=856597911\` ou \`nome=ATIA\`` }, { quoted: mek });
+                await sock.sendMessage(sender, { text: `📊 Tabela selecionada: *${stb.tabelaSelecionada}*\n\nDigite o nome da **primeira coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`megas=700MB\` ou \`valor=15\`` }, { quoted: mek });
                 return;
             }
 
@@ -390,7 +455,7 @@ async function startBot() {
             if (stb.step === 'deseja_coluna2') {
                 if (text === '1') {
                     stb.step = 'informar_coluna2';
-                    await sock.sendMessage(sender, { text: `Digite o nome da **segunda coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`nome=ATIA\`` }, { quoted: mek });
+                    await sock.sendMessage(sender, { text: `Digite o nome da **segunda coluna** e o **valor** no formato:\n\`coluna=valor\`\n\nExemplo: \`valor=15\`` }, { quoted: mek });
                     return;
                 } else if (text === '2') {
                     const payload = {};
@@ -616,14 +681,15 @@ async function startBot() {
                         data_uso: new Date().toISOString()
                     }]);
 
-                    const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorConfirmado).maybeSingle();
-                    const pacoteMegas = (preco && preco.megas) ? preco.megas : 'N/A';
+                    const pacoteIdentificado = await identificarEProcessarPacote(valorConfirmado, null);
 
-                    if (ehPacoteManual(pacoteMegas)) {
-                        const isDiamante = pacoteMegas.toLowerCase().includes('diamante');
-                        const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                    if (pacoteIdentificado.tipo !== 'normal') {
+                        let tituloMsg = "📦 *PACOTE PROCESSADO*";
+                        if (pacoteIdentificado.tipo === 'diamante') tituloMsg = "💎 *PACOTE DIAMANTE PROCESSADO*";
+                        else if (pacoteIdentificado.tipo === 'mensal') tituloMsg = "📅 *PACOTE MENSAL PROCESSADO*";
+                        else if (pacoteIdentificado.tipo === 'semanal') tituloMsg = "📆 *PACOTE SEMANAL PROCESSADO*";
                         
-                        const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n💎 Pacote: ${pacoteMegas}\n🦄 Referência: ${refConfirmada}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+                        const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n📦 Pacote: ${pacoteIdentificado.megas}\n🦄 Referência: ${refConfirmada}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
 
                         await sock.sendMessage(sender, { text: `${msgManual}\n\n@${clienteAlvo.split('@')[0]}`, mentions: [clienteAlvo] });
                         return;
@@ -631,13 +697,13 @@ async function startBot() {
 
                     await inserirNaFilaAtiva({
                         telefone: numeroVodacom,
-                        pacote: pacoteMegas,
+                        pacote: pacoteIdentificado.megas,
                         status: 'pendente',
                         sender: clienteAlvo,
                         referencia: refConfirmada
                     });
 
-                    const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa la transferência_`;
+                    const msg = `✅ *Comprovativo Aprovado Manualmente pelo Admin!*\n\n💰 *Referência:* ${refConfirmada}\n📊 *Megas:* ${pacoteIdentificado.megas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳ Processando... Aguarde enquanto o Sistema executa a transferência_`;
                     await sendMention(msg);
                     return;
                 }
@@ -756,7 +822,7 @@ async function startBot() {
                     step: 'escolher_tabela'
                 };
 
-                const msgTabelas = `📋 **ADICIONAR DADOS NO SUPABASE (.addtb)**\n\nEscolha a tabela que deseja modificar:\n\n1️⃣ \`tabela_precos\`\n2️⃣ \`comandos_customizados\`\n3️⃣ \`transecoes_pendentes\`\n4️⃣ \`fila_macrodroid\`\n5️⃣ \`memoria_aguardando\`\n6️⃣ \`pagamentos\`\n\n*(Responda enviando o número da opção desejada)*`;
+                const msgTabelas = `📋 **ADICIONAR DADOS NO SUPABASE (.addtb)**\n\nEscolha a tabela que deseja modificar:\n\n1️⃣ \`tabela_precos\`\n2️⃣ \`semanais\`\n3️⃣ \`mensais\`\n4️⃣ \`diamantes\`\n5️⃣ \`comandos_customizados\`\n6️⃣ \`transecoes_pendentes\`\n7️⃣ \`fila_macrodroid\`\n8️⃣ \`memoria_aguardando\`\n9️⃣ \`pagamentos\`\n\n*(Responda enviando o número da opção desejada)*`;
 
                 await sock.sendMessage(sender, { text: msgTabelas }, { quoted: mek });
                 return;
@@ -809,39 +875,34 @@ async function startBot() {
                     referenciaFinal = 'ADM' + Date.now();
                 }
 
-                const { data: dadosPreco } = await supabase
-                    .from('tabela_precos')
-                    .select('*')
-                    .ilike('megas', `%${pacoteSolicitado}%`)
-                    .maybeSingle();
-
-                const valorTransacao = dadosPreco?.valor || 0;
-                const megasFinais = dadosPreco?.megas || partes[1].toUpperCase();
+                const pacoteIdentificado = await identificarEProcessarPacote(null, pacoteSolicitado);
 
                 if (transacaoReal) {
                     await supabase.from('transecoes_pendentes').update({ status: 'processado' }).eq('id', transacaoReal.id);
                 } else {
                     await supabase.from('transecoes_pendentes').insert([{
                         referencia: referenciaFinal,
-                        valor: valorTransacao,
+                        valor: pacoteIdentificado.valor,
                         status: 'processado'
                     }]).select();
                 }
 
                 await supabase.from('memoria_aguardando').insert([{
                     sender: participante,
-                    valor: valorTransacao,
+                    valor: pacoteIdentificado.valor,
                     referencia: referenciaFinal,
                     status: 'usado',
                     usado_por: usuarioTag,
                     data_uso: new Date().toISOString()
                 }]);
 
-                if (ehPacoteManual(megasFinais)) {
-                    const isDiamante = megasFinais.toLowerCase().includes('diamante');
-                    const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                if (pacoteIdentificado.tipo !== 'normal') {
+                    let tituloMsg = "📦 *PACOTE PROCESSADO*";
+                    if (pacoteIdentificado.tipo === 'diamante') tituloMsg = "💎 *PACOTE DIAMANTE PROCESSADO*";
+                    else if (pacoteIdentificado.tipo === 'mensal') tituloMsg = "📅 *PACOTE MENSAL PROCESSADO*";
+                    else if (pacoteIdentificado.tipo === 'semanal') tituloMsg = "📆 *PACOTE SEMANAL PROCESSADO*";
                     
-                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${telefoneSolicitado}\n💎 Pacote: ${megasFinais}\n🦄 Referência: ${referenciaFinal}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${telefoneSolicitado}\n📦 Pacote: ${pacoteIdentificado.megas}\n🦄 Referência: ${referenciaFinal}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
 
                     await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
                     return;
@@ -849,14 +910,14 @@ async function startBot() {
 
                 await inserirNaFilaAtiva({
                     telefone: telefoneSolicitado,
-                    pacote: megasFinais,
+                    pacote: pacoteIdentificado.megas,
                     status: 'pendente',
                     sender: participante,
                     referencia: referenciaFinal
                 });
 
                 const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
-                const msgSucessoComprar = `✅ *PEDIDO CRIADO COM SUCESSO!*\n\n💰 Referência: ${referenciaFinal}\n📊 Megas: ${megasFinais}\n📱 Número: ${telefoneSolicitado}\n📍 Grupo: Vendas de Megas\n\n🔄 Pedido registrado e aguardando processamento.\n⏰ ${dataHoraAtual}`;
+                const msgSucessoComprar = `✅ *PEDIDO CRIADO COM SUCESSO!*\n\n💰 Referência: ${referenciaFinal}\n📊 Megas: ${pacoteIdentificado.megas}\n📱 Número: ${telefoneSolicitado}\n📍 Grupo: Vendas de Megas\n\n🔄 Pedido registrado e aguardando processamento.\n⏰ ${dataHoraAtual}`;
 
                 await sendMention(msgSucessoComprar);
                 return;
@@ -994,14 +1055,15 @@ async function startBot() {
                 
                 await supabase.from('transecoes_pendentes').update({ status: 'processado' }).eq('id', transacaoReal.id);
 
-                const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', transacaoReal.valor).maybeSingle();
-                const pacoteFinal = preco?.megas || 'N/A';
+                const pacoteIdentificado = await identificarEProcessarPacote(transacaoReal.valor, null);
 
-                if (ehPacoteManual(pacoteFinal)) {
-                    const isDiamante = pacoteFinal.toLowerCase().includes('diamante');
-                    const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+                if (pacoteIdentificado.tipo !== 'normal') {
+                    let tituloMsg = "📦 *PACOTE PROCESSADO*";
+                    if (pacoteIdentificado.tipo === 'diamante') tituloMsg = "💎 *PACOTE DIAMANTE PROCESSADO*";
+                    else if (pacoteIdentificado.tipo === 'mensal') tituloMsg = "📅 *PACOTE MENSAL PROCESSADO*";
+                    else if (pacoteIdentificado.tipo === 'semanal') tituloMsg = "📆 *PACOTE SEMANAL PROCESSADO*";
                     
-                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n💎 Pacote: ${pacoteFinal}\n🦄 Referência: ${referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+                    const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroVodacom}\n📦 Pacote: ${pacoteIdentificado.megas}\n🦄 Referência: ${referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
 
                     await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
                     return;
@@ -1009,13 +1071,13 @@ async function startBot() {
                 
                 await inserirNaFilaAtiva({
                     telefone: numeroVodacom,
-                    pacote: pacoteFinal,
+                    pacote: pacoteIdentificado.megas,
                     status: 'pendente',
                     sender: participante,
                     referencia: referencia
                 });
 
-                const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteFinal}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
+                const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteIdentificado.megas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
                 await sendMention(msg);
                 return;
             }
@@ -1072,14 +1134,15 @@ async function startBot() {
                 status: 'processado' 
             }).eq('referencia', mem.referencia);
 
-            const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', mem.valor).maybeSingle();
-            const pacoteFinal = preco?.megas || 'N/A';
+            const pacoteIdentificado = await identificarEProcessarPacote(mem.valor, null);
 
-            if (ehPacoteManual(pacoteFinal)) {
-                const isDiamante = pacoteFinal.toLowerCase().includes('diamante');
-                const tituloMsg = isDiamante ? "💎 *PACOTE DIAMANTE PROCESSADO*" : "📦 *PACOTE PROCESSADO*";
+            if (pacoteIdentificado.tipo !== 'normal') {
+                let tituloMsg = "📦 *PACOTE PROCESSADO*";
+                if (pacoteIdentificado.tipo === 'diamante') tituloMsg = "💎 *PACOTE DIAMANTE PROCESSADO*";
+                else if (pacoteIdentificado.tipo === 'mensal') tituloMsg = "📅 *PACOTE MENSAL PROCESSADO*";
+                else if (pacoteIdentificado.tipo === 'semanal') tituloMsg = "📆 *PACOTE SEMANAL PROCESSADO*";
                 
-                const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroLimpoText}\n💎 Pacote: ${pacoteFinal}\n🦄 Referência: ${mem.referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
+                const msgManual = `${tituloMsg}\n\n✅ Seu pacote foi enviado para processamento!\n\n📱 Número: ${numeroLimpoText}\n📦 Pacote: ${pacoteIdentificado.megas}\n🦄 Referência: ${mem.referencia}\n\n⏰ Aguarde a ativação em instantes!\n\nNB. Ativação dessa oferta é manualmente pelo admin do grupo.`;
 
                 await sock.sendMessage(sender, { text: `${msgManual}\n\n${usuarioTag}`, mentions: [participante] });
                 return;
@@ -1087,13 +1150,13 @@ async function startBot() {
             
             await inserirNaFilaAtiva({
                 telefone: numeroLimpoText,
-                pacote: pacoteFinal,
+                pacote: pacoteIdentificado.megas,
                 status: 'pendente',
                 sender: participante,
                 referencia: mem.referencia
             });
 
-            const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${pacoteFinal}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
+            const msg = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${mem.referencia}\n📊 *Megas:* ${pacoteIdentificado.megas}\n📱 *Número:* ${numeroLimpoText}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
             await sendMention(msg);
             return;
         }
@@ -1149,7 +1212,7 @@ function iniciarMonitorMacrodroid(sock) {
             if (errMacro || !concluidosMacro || concluidosMacro.length === 0) return;
 
             for (let itemMacro of concluidosMacro) {
-                // 1. Atualiza o status para concluído nas filas (procurando por referência ou telefone, sem exigir status 'pendente')
+                // 1. Atualiza o status para concluído nas filas
                 let tabelaEncontrada = 'fila_macrodroid';
                 if (itemMacro.referencia) {
                     let refLimpa = itemMacro.referencia.trim();
@@ -1173,7 +1236,6 @@ function iniciarMonitorMacrodroid(sock) {
                 let pacTransacao = itemMacro.pacote || 'N/A';
                 let clienteSender = itemMacro.sender || null;
 
-                // Se faltar o sender, recupera da memória com base na referência
                 if (!clienteSender && refTransacao !== 'N/A') {
                     const { data: dadosMemoria } = await supabase
                         .from('memoria_aguardando')
