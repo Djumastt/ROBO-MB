@@ -1276,3 +1276,7 @@ function iniciarMonitorMacrodroid(sock) {
 }
 
 startBot();
+<<<<<<< HEAD
+=======
+
+>>>>>>> cd5c1f1e250cdb7d7b7fd9561ed215acf0fde53b
