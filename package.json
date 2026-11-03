@@ -1,16 +1,14 @@
 {
-<<<<<<< HEAD
   "name": "home",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "type": "commonjs",
-=======
->>>>>>> cd5c1f1e250cdb7d7b7fd9561ed215acf0fde53b
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
     "@whiskeysockets/baileys": "^7.0.0-rc14"

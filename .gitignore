@@ -1,0 +1,7 @@
+node_modules/
+.npm/
+.ssh/
+.termux/
+.bash_history
+.gitconfig
+auth_info/
