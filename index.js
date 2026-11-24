@@ -150,7 +150,8 @@ async function processarPedidoValidado({
     valorConfirmado,
     clientePagador,
     numeroDestinatario,
-    viaAutoEnvio = false
+    viaAutoEnvio = false,
+    calarSemNumero = false
 }) {
     if (!numeroDestinatario || !/^8[45]\d{7}$/.test(numeroDestinatario) || numeroDestinatario === MEU_NUMERO_VODACOM) {
         await supabase.from('sms_entrada').update({
@@ -159,10 +160,12 @@ async function processarPedidoValidado({
             valor: String(valorConfirmado)
         }).eq('id', itemId);
 
-        await enviarSmsCliente(
-            clientePagador,
-            'Nao foi identificado um numero Vodacom valido para receber os megas. Envie o comprovativo com o numero de destino (ex: 84/85xxxxxxx).'
-        );
+        if (!calarSemNumero) {
+            await enviarSmsCliente(
+                clientePagador,
+                'Nao foi identificado um numero Vodacom valido para receber os megas. Envie o comprovativo com o numero de destino (ex: 84/85xxxxxxx).'
+            );
+        }
         return false;
     }
 
@@ -394,7 +397,9 @@ function iniciarRoboProcessamentoSMS() {
                                               textoLower.includes("ref") ||
                                               textoLower.includes("transferiste");
 
-                const ehRecebimentoDireto = textoLower.includes("recebeu") || textoLower.includes("id trans");
+                const ehRecebimentoDireto = textoLower.includes("recebeu") ||
+                                              textoLower.includes("recebeste") ||
+                                              textoLower.includes("id trans");
 
                 if (texto.length < 10 || (!ehComprovativoEnviado && !ehRecebimentoDireto)) {
                     await supabase.from('sms_entrada').update({ status: 'ignorado' }).eq('id', item.id);
@@ -409,7 +414,7 @@ function iniciarRoboProcessamentoSMS() {
                     const valorConfirmado = extrairValorMT(texto);
 
                     let clientePagador = null;
-                    const matchPagador = texto.match(/Recebeu\s+[\d.,]+\s*MT\s+de\s+(?:258)?(8[4567]\d{7})/i);
+                    const matchPagador = texto.match(/Recebe(?:u|ste)\s+[\d.,]+\s*MT\s+de\s+(?:258)?(8[4567]\d{7})/i);
                     if (matchPagador) {
                         clientePagador = matchPagador[1];
                     } else {
@@ -436,21 +441,23 @@ function iniciarRoboProcessamentoSMS() {
                         }
                     }
 
-                    // 2. Se não estiver no autoenvio, procura no conteúdo da mensagem
+                    // 2. Se não estiver no autoenvio, procura no conteúdo da mensagem (exatamente 84/85 com 9 dígitos)
                     if (!numeroDestinatario) {
-                        const matchConteudo = texto.match(/conteudo[:\s]+(?:258)?(8[45]\d{7})/i);
+                        const matchConteudo = texto.match(/conteudo[:\s]+(?:258)?(8[45]\d{7})\b/i);
                         if (matchConteudo) {
                             numeroDestinatario = normalizarNumeroMZ(matchConteudo[1]);
                         }
                     }
 
+                    // Se não tiver número destinatário válido, cala sem reagir
                     await processarPedidoValidado({
                         itemId: item.id,
                         referencia,
                         valorConfirmado,
                         clientePagador,
                         numeroDestinatario,
-                        viaAutoEnvio
+                        viaAutoEnvio,
+                        calarSemNumero: true
                     });
                     return;
                 }
