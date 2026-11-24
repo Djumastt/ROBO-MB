@@ -400,7 +400,7 @@ function iniciarRoboProcessamentoSMS() {
                         const pacoteMegas = preco?.megas || registoFila.pacote || 'N/A';
                         const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
 
-                        const msgConcluidoFinal = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referencia}\n📱 Telefone: ${telefoneDestino}\n📊 Pacote: ${pacoteMegas}\n⏰ Data/Hora: ${dataHoraAtual}\n👤 Cliente: @⁨~ViCtOr⁩\n📱 Finalizado: Dispositivo 1\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
+                        const msgConcluidoFinal = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referencia}\n📱 Telefone: ${telefoneDestino}\n📊 Pacote: ${pacoteMegas}\n⏰ Data/Hora: ${dataHoraAtual}\n📱 Finalizado: Dispositivo 1\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
                         await supabase.from('sms_saida').insert([{
                             telefone: String(clienteSender),
