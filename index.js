@@ -15,17 +15,31 @@ app.use(express.json());
 // CONFIGURAÇÃO DAS FILAS (Mãe + 9 Filas Filhas)
 // ==========================================
 const TABELAS_FILA_SMS = [
-    'fila_sms',   // Fila Mãe (Sempre ativa)
-    'fila_sms_1',
-    'fila_sms_2',
-    'fila_sms_3',
-    'fila_sms_4',
-    'fila_sms_5',
-    'fila_sms_6',
-    'fila_sms_7',
-    'fila_sms_8',
-    'fila_sms_9'
+    'fila_sms',   // Dispositivo 1 (Fila Mãe - Sempre ativa)
+    'fila_sms_1', // Dispositivo 2
+    'fila_sms_2', // Dispositivo 3
+    'fila_sms_3', // Dispositivo 4
+    'fila_sms_4', // Dispositivo 5
+    'fila_sms_5', // Dispositivo 6
+    'fila_sms_6', // Dispositivo 7
+    'fila_sms_7', // Dispositivo 8
+    'fila_sms_8', // Dispositivo 9
+    'fila_sms_9'  // Dispositivo 10
 ];
+
+// Mapeamento Fila -> Nome do Dispositivo
+const MAPA_DISPOSITIVOS = {
+    fila_sms: 'Dispositivo 1',
+    fila_sms_1: 'Dispositivo 2',
+    fila_sms_2: 'Dispositivo 3',
+    fila_sms_3: 'Dispositivo 4',
+    fila_sms_4: 'Dispositivo 5',
+    fila_sms_5: 'Dispositivo 6',
+    fila_sms_6: 'Dispositivo 7',
+    fila_sms_7: 'Dispositivo 8',
+    fila_sms_8: 'Dispositivo 9',
+    fila_sms_9: 'Dispositivo 10'
+};
 
 // O seu número pessoal/do agente (que deve ser ignorado como destino de megas)
 const MEU_NUMERO_VODACOM = '856597911';
@@ -43,6 +57,220 @@ const estadoFilas = {
     fila_sms_9: false
 };
 
+// Estado interativo do comando .addnr no WhatsApp (por utilizador)
+const sessoesAddNr = new Map();
+const TEMPO_EXPIRACAO_SESSAO_MS = 2 * 60 * 1000; // 2 minutos
+
+function normalizarNumeroMZ(numero) {
+    const digitos = String(numero || '').replace(/\D/g, '');
+    if (digitos.startsWith('258') && digitos.length === 12) {
+        return digitos.slice(3);
+    }
+    return digitos;
+}
+
+function telefoneValidoParaSMS(numero) {
+    const limpo = normalizarNumeroMZ(numero);
+    return /^8[4567]\d{7}$/.test(limpo) ? limpo : null;
+}
+
+async function enviarSmsCliente(destino, mensagem) {
+    const tel = telefoneValidoParaSMS(destino);
+    if (!tel || !mensagem) return;
+
+    const { error } = await supabase.from('sms_saida').insert([{
+        telefone: String(tel),
+        mensagem: String(mensagem),
+        status: 'pendente'
+    }]);
+
+    if (error) {
+        console.log(`❌ [SMS_SAIDA] Erro ao agendar SMS para ${tel}:`, error.message);
+    } else {
+        console.log(`📨 [SMS_SAIDA] Mensagem agendada para ${tel}.`);
+    }
+}
+
+function extrairReferencia(texto) {
+    const matchIdTransacao = texto.match(/ID\s+(?:da\s+)?transa[cç][aã]o[:\s]+([A-Z0-9.]+)/i);
+    if (matchIdTransacao) {
+        return matchIdTransacao[1].replace(/\.$/, '').trim();
+    }
+
+    const matchConfirmado = texto.match(/\bConfirmado\s+([A-Z0-9.]+)/i);
+    if (matchConfirmado) {
+        return matchConfirmado[1].replace(/\.$/, '').trim();
+    }
+
+    const matchRef = texto.match(/(ID Trans|Transacao|Transação|Ref)[:\s]+([A-Z0-9.]+)/i);
+    if (matchRef) {
+        return matchRef[2].replace(/\.$/, '').trim();
+    }
+
+    return "NAO_ENCONTRADA";
+}
+
+function extrairValorMT(texto) {
+    const matchValor = texto.match(/(\d+([.,]\d+)?)\s*MT/i);
+    if (matchValor) {
+        return parseFloat(matchValor[1].replace(',', '.')).toString();
+    }
+    return '0';
+}
+
+function extrairDestinoComprovativo(texto, meuNumero) {
+    // 1. Tenta explicitamente em "conteudo: 84/85..."
+    const matchConteudo = texto.match(/conteudo[:\s]+(258)?(8[45]\d{7})/i);
+    if (matchConteudo) {
+        const num = normalizarNumeroMZ(matchConteudo[2]);
+        if (num && num !== meuNumero) return num;
+    }
+
+    // 2. Procura números de 9 dígitos (com ou sem 258) no texto / linhas
+    const candidatos = [];
+    const regexNums = /(?:258)?(8[4567]\d{7})/g;
+    let m;
+    while ((m = regexNums.exec(texto)) !== null) {
+        const normalizado = normalizarNumeroMZ(m[1]);
+        if (normalizado) candidatos.push(normalizado);
+    }
+
+    // Prioriza números Vodacom (84/85) que não sejam o número do agente
+    const vodacomValidos = candidatos.filter(n => /^8[45]\d{7}$/.test(n) && n !== meuNumero);
+    if (vodacomValidos.length > 0) {
+        return vodacomValidos[vodacomValidos.length - 1];
+    }
+
+    return null;
+}
+
+async function processarPedidoValidado({
+    itemId,
+    referencia,
+    valorConfirmado,
+    clientePagador,
+    numeroDestinatario,
+    viaAutoEnvio = false
+}) {
+    if (!numeroDestinatario || !/^8[45]\d{7}$/.test(numeroDestinatario) || numeroDestinatario === MEU_NUMERO_VODACOM) {
+        await supabase.from('sms_entrada').update({
+            status: 'rejeitado_sem_vodacom',
+            referencia,
+            valor: String(valorConfirmado)
+        }).eq('id', itemId);
+
+        await enviarSmsCliente(
+            clientePagador,
+            'Nao foi identificado um numero Vodacom valido para receber os megas. Envie o comprovativo com o numero de destino (ex: 84/85xxxxxxx).'
+        );
+        return false;
+    }
+
+    if (referencia === "NAO_ENCONTRADA") {
+        await supabase.from('sms_entrada').update({
+            status: 'rejeitado_sem_ref',
+            valor: String(valorConfirmado)
+        }).eq('id', itemId);
+
+        await enviarSmsCliente(
+            clientePagador,
+            'Comprovativo invalido ou sem referencia identificada. Verifique a mensagem e tente novamente.'
+        );
+        return false;
+    }
+
+    const { data: jaUsado } = await supabase
+        .from('memoria_aguardando')
+        .select('*')
+        .eq('referencia', referencia)
+        .maybeSingle();
+
+    if (jaUsado) {
+        await supabase.from('sms_entrada').update({
+            status: 'duplicado',
+            referencia,
+            valor: String(valorConfirmado)
+        }).eq('id', itemId);
+
+        await enviarSmsCliente(
+            clientePagador,
+            `Este comprovativo (Ref: ${referencia}) ja foi utilizado anteriormente.`
+        );
+        return false;
+    }
+
+    const { data: transacaoReal } = await supabase
+        .from('transecoes_pendentes')
+        .select('*')
+        .eq('referencia', referencia)
+        .maybeSingle();
+
+    if (!transacaoReal) {
+        await supabase.from('sms_entrada').update({
+            status: 'nao_encontrado',
+            referencia,
+            valor: String(valorConfirmado)
+        }).eq('id', itemId);
+
+        await enviarSmsCliente(
+            clientePagador,
+            `Comprovativo invalido ou transacao (Ref: ${referencia}) nao encontrada no sistema.`
+        );
+        return false;
+    }
+
+    await supabase.from('sms_entrada').update({
+        status: 'processado',
+        referencia,
+        valor: String(valorConfirmado)
+    }).eq('id', itemId);
+
+    await supabase.from('sms_macro').insert([{
+        referencia,
+        valor: valorConfirmado,
+        sender: String(clientePagador)
+    }]);
+
+    await supabase.from('memoria_aguardando').insert([{
+        sender: String(clientePagador),
+        valor: valorConfirmado,
+        referencia
+    }]);
+
+    await supabase.from('transecoes_pendentes').update({ status: 'concluido' }).eq('id', transacaoReal.id);
+
+    const { data: preco } = await supabase
+        .from('tabela_precos')
+        .select('megas')
+        .eq('valor', valorConfirmado)
+        .maybeSingle();
+
+    const pacoteMegas = preco?.megas || 'N/A';
+
+    await inserirNaFilaSMS({
+        telefone: numeroDestinatario,
+        pacote: pacoteMegas,
+        status: 'pendente',
+        sender: String(clientePagador),
+        referencia: referencia
+    });
+
+    // SMS enviado para o cliente que pagou
+    await enviarSmsCliente(
+        clientePagador,
+        'Pedido Recebido! Aguarde uns instantes enquanto o sistema processa o seu pedido!'
+    );
+
+    // Notificação no grupo WhatsApp
+    if (globalSock) {
+        const etiquetaAuto = viaAutoEnvio ? ' ⚡ *(Auto-Envio)*' : '';
+        const msgGrupo = `✅ *Pedido Recebido!*${etiquetaAuto}\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroDestinatario}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
+        await globalSock.sendMessage(GRUPO_AUTORIZADO, { text: msgGrupo });
+    }
+
+    return true;
+}
+
 let indiceUltimaFilaSMS = 0;
 
 // Lógica de rotação cíclica: Mãe ➔ Filas Ativas ➔ Mãe
@@ -58,7 +286,7 @@ async function obterProximaTabelaFilaSMS() {
     indiceUltimaFilaSMS = indiceUltimaFilaSMS % tabelasAtivas.length;
     let tabelaEscolhida = tabelasAtivas[indiceUltimaFilaSMS];
     indiceUltimaFilaSMS = (indiceUltimaFilaSMS + 1) % tabelasAtivas.length;
-    
+
     return tabelaEscolhida;
 }
 
@@ -68,7 +296,7 @@ async function inserirNaFilaSMS(dadosPedido) {
     if (error) {
         console.log(`❌ [FILA] Erro ao inserir na tabela ${tabelaDestino}:`, error.message);
     } else {
-        console.log(`✅ [FILA] Pedido direcionado com sucesso em ordem para: ${tabelaDestino}`);
+        console.log(`✅ [FILA] Pedido direcionado com sucesso em ordem para: ${tabelaDestino} (${MAPA_DISPOSITIVOS[tabelaDestino]})`);
     }
     return tabelaDestino;
 }
@@ -143,7 +371,7 @@ function iniciarRoboProcessamentoSMS() {
 
                 const texto = String(item.receber || '').trim();
                 const textoLower = texto.toLowerCase();
-                const sender = item.sender;
+                const sender = normalizarNumeroMZ(item.sender) || String(item.sender);
 
                 if (textoLower === 'tabela' || textoLower === 'pagamento') {
                     const { data: cmdData } = await supabase
@@ -153,11 +381,7 @@ function iniciarRoboProcessamentoSMS() {
                         .maybeSingle();
 
                     if (cmdData && cmdData.resposta) {
-                        await supabase.from('sms_saida').insert([{
-                            telefone: String(sender),
-                            mensagem: cmdData.resposta,
-                            status: 'pendente'
-                        }]);
+                        await enviarSmsCliente(sender, cmdData.resposta);
                     }
 
                     await supabase.from('sms_entrada').update({ status: 'respondido' }).eq('id', item.id);
@@ -166,6 +390,7 @@ function iniciarRoboProcessamentoSMS() {
 
                 const ehComprovativoEnviado = textoLower.includes("confirmado") ||
                                               textoLower.includes("transacao") ||
+                                              textoLower.includes("transação") ||
                                               textoLower.includes("ref") ||
                                               textoLower.includes("transferiste");
 
@@ -177,182 +402,96 @@ function iniciarRoboProcessamentoSMS() {
                 }
 
                 // -------------------------------------------------------------
-                // CASO A: SMS DE RECEBIMENTO DIRETO
+                // CASO A: SMS DE RECEBIMENTO DIRETO (com suporte a AUTOENVIO)
                 // -------------------------------------------------------------
                 if (ehRecebimentoDireto) {
-                    let matchRef = texto.match(/(ID Trans|Transacao|Ref)[:\s]+([A-Z0-9.]+)/i);
-                    let referencia = matchRef ? matchRef[2].replace(/\.$/, "").trim() : "NAO_ENCONTRADA";
-
-                    let valorConfirmado = 0;
-                    const matchValor = texto.match(/(\d+([.,]\d+)?)\s*MT/i);
-                    if (matchValor) {
-                        valorConfirmado = parseFloat(matchValor[1].replace(',', '.')).toString();
-                    }
+                    const referencia = extrairReferencia(texto);
+                    const valorConfirmado = extrairValorMT(texto);
 
                     let clientePagador = null;
-                    const matchPagador = texto.match(/Recebeu\s+[\d.,]+\s*MT\s+de\s+(8[4567]\d{7})/i);
+                    const matchPagador = texto.match(/Recebeu\s+[\d.,]+\s*MT\s+de\s+(?:258)?(8[4567]\d{7})/i);
                     if (matchPagador) {
                         clientePagador = matchPagador[1];
                     } else {
-                        const numsGerais = texto.match(/\b(8[4567]\d{7})\b/g) || [];
+                        const numsGerais = texto.match(/\b(?:258)?(8[4567]\d{7})\b/g) || [];
                         if (numsGerais.length > 0) clientePagador = numsGerais[0];
                     }
-                    if (!clientePagador) clientePagador = sender;
+                    clientePagador = normalizarNumeroMZ(clientePagador) || sender;
 
+                    // 1. Verifica se o pagador está registado na tabela 'autoenvio'
                     let numeroDestinatario = null;
-                    const matchConteudo = texto.match(/conteudo[:\s]+(8[45]\d{7})/i);
-                    if (matchConteudo) {
-                        numeroDestinatario = matchConteudo[1];
+                    let viaAutoEnvio = false;
+
+                    if (clientePagador) {
+                        const { data: regAutoEnvio } = await supabase
+                            .from('autoenvio')
+                            .select('nr_receber')
+                            .eq('nr_pagamento', clientePagador)
+                            .maybeSingle();
+
+                        if (regAutoEnvio && regAutoEnvio.nr_receber) {
+                            numeroDestinatario = normalizarNumeroMZ(regAutoEnvio.nr_receber);
+                            viaAutoEnvio = true;
+                            console.log(`⚡ [AUTOENVIO] Número ${clientePagador} encontrado -> Destino automático: ${numeroDestinatario}`);
+                        }
                     }
 
-                    if (!numeroDestinatario || !/^8[45]\d{7}$/.test(numeroDestinatario)) {
-                        await supabase.from('sms_entrada').update({ status: 'rejeitado_sem_vodacom', referencia, valor: String(valorConfirmado), receber: 'SEM_NUMERO_VODACOM' }).eq('id', item.id);
-                        return;
+                    // 2. Se não estiver no autoenvio, procura no conteúdo da mensagem
+                    if (!numeroDestinatario) {
+                        const matchConteudo = texto.match(/conteudo[:\s]+(?:258)?(8[45]\d{7})/i);
+                        if (matchConteudo) {
+                            numeroDestinatario = normalizarNumeroMZ(matchConteudo[1]);
+                        }
                     }
 
-                    if (referencia === "NAO_ENCONTRADA") {
-                        await supabase.from('sms_entrada').update({ status: 'rejeitado_sem_ref' }).eq('id', item.id);
-                        return;
-                    }
-
-                    const { data: jaUsado } = await supabase.from('memoria_aguardando').select('*').eq('referencia', referencia).maybeSingle();
-                    if (jaUsado) {
-                        await supabase.from('sms_entrada').update({ status: 'duplicado', referencia, valor: String(valorConfirmado), receber: 'JA_USADO' }).eq('id', item.id);
-                        return;
-                    }
-
-                    const { data: transacaoReal } = await supabase.from('transecoes_pendentes').select('*').eq('referencia', referencia).eq('status', 'pendente').maybeSingle();
-                    if (!transacaoReal) {
-                        await supabase.from('sms_entrada').update({ status: 'nao_encontrado', referencia, valor: String(valorConfirmado), receber: numeroDestinatario }).eq('id', item.id);
-                        return;
-                    }
-
-                    await supabase.from('sms_entrada').update({ status: 'processado', referencia, valor: String(valorConfirmado), receber: numeroDestinatario }).eq('id', item.id);
-
-                    await supabase.from('sms_macro').insert([{ referencia, valor: valorConfirmado, sender: String(clientePagador), receber: numeroDestinatario, status: 'pendente' }]);
-                    await supabase.from('memoria_aguardando').insert([{ sender: String(clientePagador), valor: valorConfirmado, referencia, status: 'usado', usado_por: `Recebimento (${clientePagador})` }]);
-                    await supabase.from('transecoes_pendentes').update({ status: 'concluido' }).eq('id', transacaoReal.id);
-
-                    const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorConfirmado).maybeSingle();
-                    const pacoteMegas = preco?.megas || 'N/A';
-
-                    await inserirNaFilaSMS({
-                        telefone: numeroDestinatario,
-                        pacote: pacoteMegas,
-                        status: 'pendente',
-                        sender: String(clientePagador),
-                        referencia: referencia
+                    await processarPedidoValidado({
+                        itemId: item.id,
+                        referencia,
+                        valorConfirmado,
+                        clientePagador,
+                        numeroDestinatario,
+                        viaAutoEnvio
                     });
+                    return;
+                }
 
-                    await supabase.from('sms_saida').insert([{
-                        telefone: String(clientePagador),
-                        mensagem: 'Pedido Recebido! Aguarde uns instantes enquanto o sistema processa o seu pedido!',
-                        status: 'pendente'
-                    }]);
+                // -------------------------------------------------------------
+                // CASO B: COMPROVATIVO ENVIADO ("Transferiste" / "Confirmado")
+                // -------------------------------------------------------------
+                if (ehComprovativoEnviado) {
+                    const referencia = extrairReferencia(texto);
+                    const valorConfirmado = extrairValorMT(texto);
+                    const numeroDestinatario = extrairDestinoComprovativo(texto, MEU_NUMERO_VODACOM);
 
-                    if (globalSock) {
-                        const msgGrupo = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroDestinatario}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
-                        await globalSock.sendMessage(GRUPO_AUTORIZADO, { text: msgGrupo });
+                    // Se não vier com número destinatário válido, ignora e avisa o cliente
+                    if (!numeroDestinatario) {
+                        await supabase.from('sms_entrada').update({
+                            status: 'ignorado',
+                            referencia,
+                            valor: String(valorConfirmado)
+                        }).eq('id', item.id);
+
+                        await enviarSmsCliente(
+                            sender,
+                            'Envie o comprovativo acompanhado do numero Vodacom que vai receber os megas (ex: 84/85xxxxxxx).'
+                        );
+                        return;
                     }
+
+                    await processarPedidoValidado({
+                        itemId: item.id,
+                        referencia,
+                        valorConfirmado,
+                        clientePagador: sender,
+                        numeroDestinatario,
+                        viaAutoEnvio: false
+                    });
                     return;
                 }
-
-                // -------------------------------------------------------------
-                // CASO B: COMPROVATIVO ENVIADO PELO CLIENTE
-                // -------------------------------------------------------------
-                let referencia = "NAO_ENCONTRADA";
-                let matchRef = texto.match(/(ID da transacao|transacao|Ref|Confirmado)[:\s]+([A-Z0-9.]+)/i);
-                if (matchRef) {
-                    referencia = matchRef[2] || matchRef[1];
-                } else {
-                    let matchPP = texto.match(/(PP[A-Z0-9.]+)/i);
-                    if (matchPP) referencia = matchPP[1];
-                }
-                referencia = referencia.replace(/\.$/, "").trim();
-
-                let valorConfirmado = 0;
-                const matchValor = texto.match(/(\d+([.,]\d+)?)\s*MT/i);
-                if (matchValor) {
-                    valorConfirmado = parseFloat(matchValor[1].replace(',', '.')).toString();
-                }
-
-                if (referencia === "NAO_ENCONTRADA" || valorConfirmado <= 0) {
-                    await supabase.from('sms_entrada').update({ status: 'rejeitado', referencia, valor: String(valorConfirmado), receber: 'NAO_ENCONTRADA' }).eq('id', item.id);
-                    await supabase.from('sms_saida').insert([{ telefone: String(sender), mensagem: `❌ Formato de comprovativo inválido.`, status: 'pendente' }]);
-                    return;
-                }
-
-                const { data: jaUsado } = await supabase.from('memoria_aguardando').select('*').eq('referencia', referencia).maybeSingle();
-                if (jaUsado) {
-                    await supabase.from('sms_entrada').update({ status: 'duplicado', referencia, valor: String(valorConfirmado), receber: 'JA_USADO' }).eq('id', item.id);
-                    await supabase.from('sms_saida').insert([{ telefone: String(sender), mensagem: `❌ O teu comprovativo já foi usado anteriormente!`, status: 'pendente' }]);
-                    return;
-                }
-
-                // EXTRAÇÃO RESTRITA: Procura números Vodacom válidos no texto, IGNORANDO o seu número (MEU_NUMERO_VODACOM)
-                let numeroVodacom = null;
-                const todosVodacom = texto.match(/\b(8[45]\d{7})\b/g) || [];
-                
-                // Filtra para remover o seu número pessoal da lista de candidatos
-                const numerosValidosCliente = todosVodacom.filter(num => num !== MEU_NUMERO_VODACOM);
-
-                if (numerosValidosCliente.length > 0) {
-                    // Pega o último número válido que o cliente colocou na ponta
-                    numeroVodacom = numerosValidosCliente[numerosValidosCliente.length - 1];
-                }
-
-                if (!numeroVodacom || !/^8[45]\d{7}$/.test(numeroVodacom)) {
-                    await supabase.from('sms_entrada').update({ status: 'rejeitado_sem_numero', referencia, valor: String(valorConfirmado), receber: 'NUMERO_FALTA' }).eq('id', item.id);
-                    await supabase.from('sms_saida').insert([{ 
-                        telefone: String(sender), 
-                        mensagem: `❌ Envie o comprovativo juntamente com o seu número Vodacom na ponta final para receber os megas.`, 
-                        status: 'pendente' 
-                    }]);
-                    return;
-                }
-
-                const { data: transacaoReal } = await supabase.from('transecoes_pendentes').select('*').eq('referencia', referencia).eq('status', 'pendente').maybeSingle();
-                if (!transacaoReal) {
-                    await supabase.from('sms_entrada').update({ status: 'nao_encontrado', referencia, valor: String(valorConfirmado), receber: numeroVodacom }).eq('id', item.id);
-                    return;
-                }
-
-                // SUCESSO: ATUALIZA IMEDIATAMENTE PARA PROCESSADO
-                await supabase.from('sms_entrada').update({ status: 'processado', referencia, valor: String(valorConfirmado), receber: numeroVodacom }).eq('id', item.id);
-
-                await supabase.from('sms_macro').insert([{ referencia, valor: valorConfirmado, sender: String(sender), receber: numeroVodacom, status: 'pendente' }]);
-                await supabase.from('transecoes_pendentes').update({ status: 'concluido' }).eq('id', transacaoReal.id);
-                await supabase.from('memoria_aguardando').insert([{ sender: String(sender), valor: valorConfirmado, referencia, status: 'usado', usado_por: `SMS (${sender})` }]);
-
-                const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorConfirmado).maybeSingle();
-                const pacoteMegas = preco?.megas || 'N/A';
-
-                await inserirNaFilaSMS({
-                    telefone: numeroVodacom,
-                    pacote: pacoteMegas,
-                    status: 'pendente',
-                    sender: String(sender),
-                    referencia: referencia
-                });
-
-                // SMS curto exigido para sms_saida
-                await supabase.from('sms_saida').insert([{
-                    telefone: String(sender),
-                    mensagem: 'Pedido Recebido! Aguarde uns instantes enquanto o sistema processa o seu pedido!',
-                    status: 'pendente'
-                }]);
-
-                // Mensagem detalhada para o Grupo do WhatsApp
-                if (globalSock) {
-                    const msgGrupo = `✅ *Pedido Recebido!*\n\n💰 *Referência:* ${referencia}\n📊 *Megas:* ${pacoteMegas}\n📱 *Número:* ${numeroVodacom}\n\n_⏳Processando... Aguarde enquanto o Sistema executa a transferência_`;
-                    await globalSock.sendMessage(GRUPO_AUTORIZADO, { text: msgGrupo });
-                }
-
-                console.log(`✅ [ROBÔ] Comprovativo processado! Ref: ${referencia} | Destino: ${numeroVodacom}`);
             }
 
             // =========================================================
-            // PARTE B: VERIFICAR 'sms_concluidos' (Gravado pelo Macrodroid)
+            // PARTE C: VERIFICAR 'sms_concluidos' (Gravado pelo Macrodroid)
             // =========================================================
             const { data: concluidosPeloMacro, error: errConcluidos } = await supabase
                 .from('sms_concluidos')
@@ -396,24 +535,30 @@ function iniciarRoboProcessamentoSMS() {
                             .update({ status: 'concluido' })
                             .eq('id', registoFila.id);
 
-                        const { data: preco } = await supabase.from('tabela_precos').select('megas').eq('valor', valorTransacao).maybeSingle();
+                        const { data: preco } = await supabase
+                            .from('tabela_precos')
+                            .select('megas')
+                            .eq('valor', valorTransacao)
+                            .maybeSingle();
+
                         const pacoteMegas = preco?.megas || registoFila.pacote || 'N/A';
+                        const telefoneFinal = telefoneDestino || registoFila.telefone || 'N/A';
+                        const senderFinal = clienteSender || registoFila.sender;
+                        const nomeDispositivo = MAPA_DISPOSITIVOS[tabelaEncontrada] || 'Dispositivo 1';
                         const dataHoraAtual = new Date().toLocaleString('pt-PT', { timeZone: 'Africa/Maputo' });
 
-                        const msgConcluidoFinal = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referencia}\n📱 Telefone: ${telefoneDestino}\n📊 Pacote: ${pacoteMegas}\n⏰ Data/Hora: ${dataHoraAtual}\n📱 Finalizado: Dispositivo 1\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
+                        const msgConcluidoFinal = `✅ *Transação Concluída Com Sucesso*\n\n💰 *Referência:* ${referencia}\n📱 Telefone: ${telefoneFinal}\n📊 Pacote: ${pacoteMegas}\n⏰ Data/Hora: ${dataHoraAtual}\n📱 Finalizado: ${nomeDispositivo}\n\n_Transferencia Processada Automáticamente Pelo Sistema_`;
 
-                        await supabase.from('sms_saida').insert([{
-                            telefone: String(clienteSender),
-                            mensagem: msgConcluidoFinal,
-                            status: 'pendente'
-                        }]);
+                        if (senderFinal) {
+                            await enviarSmsCliente(senderFinal, msgConcluidoFinal);
+                        }
 
                         if (globalSock) {
                             await globalSock.sendMessage(GRUPO_AUTORIZADO, { text: msgConcluidoFinal });
                         }
 
                         await supabase.from('sms_concluidos').delete().eq('id', itemConcluido.id);
-                        console.log(`🧹 [SMS_CONCLUIDOS] Registo ${referencia} limpo com sucesso!`);
+                        console.log(`🧹 [SMS_CONCLUIDOS] Registo ${referencia} (${nomeDispositivo}) limpo com sucesso!`);
                     } else {
                         await supabase.from('sms_concluidos').delete().eq('id', itemConcluido.id);
                     }
@@ -456,7 +601,7 @@ app.get('/sms-saida', async (req, res) => {
 // ==========================================
 async function iniciarWhatsAppBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    
+
     const sock = makeWASocket({
         auth: {
             creds: state.creds,
@@ -476,7 +621,7 @@ async function iniciarWhatsAppBot() {
             const { connection } = update;
             if (connection === 'connecting') {
                 await new Promise(resolve => setTimeout(resolve, 3000));
-                
+
                 const readline = require('readline').createInterface({ input: process.stdin, output: process.stdout });
                 readline.question('\n📱 Digite seu número com DDI (ex: 25884xxxxxxx): ', async (phoneNumber) => {
                     readline.close();
@@ -511,6 +656,7 @@ async function iniciarWhatsAppBot() {
         if (!m.message || m.key.fromMe) return;
 
         const remoteJid = m.key.remoteJid;
+        const participante = m.key.participant || remoteJid;
         const textoMsg = m.message.conversation || m.message.extendedTextMessage?.text || '';
 
         if (remoteJid.endsWith('@g.us')) {
@@ -518,17 +664,247 @@ async function iniciarWhatsAppBot() {
         }
 
         if (!remoteJid.endsWith('@g.us') || remoteJid !== GRUPO_AUTORIZADO) {
-            return; 
+            return;
         }
 
-        const comando = textoMsg.trim().toLowerCase();
+        const textoLimpo = textoMsg.trim();
+        const comando = textoLimpo.toLowerCase();
 
+        // -------------------------------------------------------------
+        // COMANDO .vernr (Listar todos ou consultar um número específico)
+        // -------------------------------------------------------------
+        if (comando === '.vernr' || comando.startsWith('.vernr ')) {
+            const argumentoBruto = textoLimpo.slice(6).trim();
+
+            if (!argumentoBruto) {
+                const { data: lista, error } = await supabase
+                    .from('autoenvio')
+                    .select('nr_pagamento, nr_receber')
+                    .order('id', { ascending: true });
+
+                if (error) {
+                    await sock.sendMessage(remoteJid, {
+                        text: `❌ Erro ao consultar a tabela *autoenvio*: ${error.message}`
+                    });
+                    return;
+                }
+
+                if (!lista || lista.length === 0) {
+                    await sock.sendMessage(remoteJid, {
+                        text: '📭 Nenhum número cadastrado no *auto-envio* no momento.'
+                    });
+                    return;
+                }
+
+                const linhas = lista.map((item, idx) =>
+                    `${idx + 1}. 💳 Paga: *${item.nr_pagamento}* ➔ 📲 Recebe: *${item.nr_receber}*`
+                );
+
+                await sock.sendMessage(remoteJid, {
+                    text: `📋 *NÚMEROS DE AUTO-ENVIO (${lista.length})*\n\n${linhas.join('\n')}`
+                });
+                return;
+            }
+
+            const numeroConsulta = normalizarNumeroMZ(argumentoBruto);
+            if (!/^\d{9}$/.test(numeroConsulta)) {
+                await sock.sendMessage(remoteJid, {
+                    text: '⚠️ Número inválido para consulta. Use: `.vernr 877123363`'
+                });
+                return;
+            }
+
+            const { data: encontrados, error } = await supabase
+                .from('autoenvio')
+                .select('nr_pagamento, nr_receber')
+                .or(`nr_pagamento.eq.${numeroConsulta},nr_receber.eq.${numeroConsulta}`);
+
+            if (error) {
+                await sock.sendMessage(remoteJid, {
+                    text: `❌ Erro ao consultar o número *${numeroConsulta}*: ${error.message}`
+                });
+                return;
+            }
+
+            if (!encontrados || encontrados.length === 0) {
+                await sock.sendMessage(remoteJid, {
+                    text: `❌ O número *${numeroConsulta}* *NÃO* está na lista de auto-envio (nem como pagador nem como receptor).`
+                });
+                return;
+            }
+
+            const detalhes = encontrados.map((item) => {
+                const papeis = [];
+                if (item.nr_pagamento === numeroConsulta) papeis.push('💳 *Paga*');
+                if (item.nr_receber === numeroConsulta) papeis.push('📲 *Recebe Megas*');
+                return `• Papel: ${papeis.join(' e ')}\n  💳 Paga: *${item.nr_pagamento}* ➔ 📲 Recebe: *${item.nr_receber}*`;
+            });
+
+            await sock.sendMessage(remoteJid, {
+                text: `✅ *Número *${numeroConsulta}* Encontrado no Auto-Envio!*\n\n${detalhes.join('\n\n')}`
+            });
+            return;
+        }
+
+        // -------------------------------------------------------------
+        // FLUXO INTERATIVO DO COMANDO .addnr
+        // -------------------------------------------------------------
+        if (comando === '.addnr') {
+            sessoesAddNr.set(participante, {
+                etapa: 'ESCOLHER_ACAO',
+                expiraEm: Date.now() + TEMPO_EXPIRACAO_SESSAO_MS
+            });
+
+            await sock.sendMessage(remoteJid, {
+                text: `⚙️ *CONFIGURAÇÃO DE AUTO-ENVIO*\n\nQual operação deseja realizar?\n\n1️⃣ *Adicionar* número\n2️⃣ *Excluir* número\n\n_Responda com *1* (ou *adicionar*), *2* (ou *excluir*), ou digite *cancelar*._`
+            });
+            return;
+        }
+
+        if (sessoesAddNr.has(participante)) {
+            const sessao = sessoesAddNr.get(participante);
+
+            if (Date.now() > sessao.expiraEm) {
+                sessoesAddNr.delete(participante);
+            } else if (!comando.startsWith('.')) {
+                if (comando === 'cancelar') {
+                    sessoesAddNr.delete(participante);
+                    await sock.sendMessage(remoteJid, { text: '❌ Operação de auto-envio cancelada.' });
+                    return;
+                }
+
+                if (sessao.etapa === 'ESCOLHER_ACAO') {
+                    if (comando === '1' || comando === 'adicionar') {
+                        sessao.etapa = 'AGUARDAR_NR_PAGAMENTO';
+                        sessao.expiraEm = Date.now() + TEMPO_EXPIRACAO_SESSAO_MS;
+                        await sock.sendMessage(remoteJid, {
+                            text: '📥 Digite o *número que vai enviar o dinheiro* (ex: `841234567` ou `851234567`):'
+                        });
+                        return;
+                    }
+
+                    if (comando === '2' || comando === 'excluir') {
+                        sessao.etapa = 'AGUARDAR_NR_EXCLUIR';
+                        sessao.expiraEm = Date.now() + TEMPO_EXPIRACAO_SESSAO_MS;
+                        await sock.sendMessage(remoteJid, {
+                            text: '🗑️ Digite o *número que deseja excluir* do auto-envio:'
+                        });
+                        return;
+                    }
+
+                    await sock.sendMessage(remoteJid, {
+                        text: '⚠️ Opção inválida. Responda com *1* (Adicionar), *2* (Excluir) ou *cancelar*.'
+                    });
+                    return;
+                }
+
+                if (sessao.etapa === 'AGUARDAR_NR_PAGAMENTO') {
+                    const nrPagamento = normalizarNumeroMZ(textoLimpo);
+                    if (!/^8[4567]\d{7}$/.test(nrPagamento)) {
+                        await sock.sendMessage(remoteJid, {
+                            text: '⚠️ Número inválido. Digite um número moçambicano válido com 9 dígitos (ex: `841234567`):'
+                        });
+                        return;
+                    }
+
+                    sessao.nrPagamento = nrPagamento;
+                    sessao.etapa = 'AGUARDAR_NR_RECEBER';
+                    sessao.expiraEm = Date.now() + TEMPO_EXPIRACAO_SESSAO_MS;
+
+                    await sock.sendMessage(remoteJid, {
+                        text: `✅ Número de pagamento registado: *${nrPagamento}*\n\n📲 Agora digite o *número Vodacom que vai receber os megas* (ex: \`841234567\` ou \`851234567\`):`
+                    });
+                    return;
+                }
+
+                if (sessao.etapa === 'AGUARDAR_NR_RECEBER') {
+                    const nrReceber = normalizarNumeroMZ(textoLimpo);
+                    if (!/^8[45]\d{7}$/.test(nrReceber)) {
+                        await sock.sendMessage(remoteJid, {
+                            text: '⚠️ Número de destino inválido. Digite um número Vodacom válido (`84` ou `85` com 9 dígitos):'
+                        });
+                        return;
+                    }
+
+                    const nrPagamento = sessao.nrPagamento;
+                    sessoesAddNr.delete(participante);
+
+                    const { data: existente } = await supabase
+                        .from('autoenvio')
+                        .select('id')
+                        .eq('nr_pagamento', nrPagamento)
+                        .maybeSingle();
+
+                    let erroDb = null;
+                    if (existente) {
+                        const { error } = await supabase
+                            .from('autoenvio')
+                            .update({ nr_receber: nrReceber })
+                            .eq('id', existente.id);
+                        erroDb = error;
+                    } else {
+                        const { error } = await supabase
+                            .from('autoenvio')
+                            .insert([{ nr_pagamento: nrPagamento, nr_receber: nrReceber }]);
+                        erroDb = error;
+                    }
+
+                    if (erroDb) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `❌ Erro ao guardar no banco de dados: ${erroDb.message}`
+                        });
+                    } else {
+                        await sock.sendMessage(remoteJid, {
+                            text: `✅ *Auto-Envio Configurado com Sucesso!*\n\n💳 *Pagador:* ${nrPagamento}\n📲 *Recebe Megas:* ${nrReceber}`
+                        });
+                    }
+                    return;
+                }
+
+                if (sessao.etapa === 'AGUARDAR_NR_EXCLUIR') {
+                    const nrExcluir = normalizarNumeroMZ(textoLimpo);
+                    if (!/^\d{9}$/.test(nrExcluir)) {
+                        await sock.sendMessage(remoteJid, {
+                            text: '⚠️ Número inválido. Digite os 9 dígitos do número que pretende excluir:'
+                        });
+                        return;
+                    }
+
+                    sessoesAddNr.delete(participante);
+
+                    const { data: removidos, error: erroDel } = await supabase
+                        .from('autoenvio')
+                        .delete()
+                        .or(`nr_pagamento.eq.${nrExcluir},nr_receber.eq.${nrExcluir}`)
+                        .select();
+
+                    if (erroDel) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `❌ Erro ao excluir do banco de dados: ${erroDel.message}`
+                        });
+                    } else if (!removidos || removidos.length === 0) {
+                        await sock.sendMessage(remoteJid, {
+                            text: `⚠️ Nenhum registo encontrado na tabela *autoenvio* para o número *${nrExcluir}*.`
+                        });
+                    } else {
+                        await sock.sendMessage(remoteJid, {
+                            text: `🗑️ *Auto-Envio Removido com Sucesso!*\n\nNúmero *${nrExcluir}* excluído (${removidos.length} registo(s) removido(s)).`
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+
+        // -------------------------------------------------------------
+        // COMANDOS DE CONTROLO DAS FILAS
+        // -------------------------------------------------------------
         if (comando.startsWith('.ativafila')) {
             const numeroFila = comando.replace('.ativafila', '').trim();
             const nomeTabela = `fila_sms_${numeroFila}`;
             if (estadoFilas.hasOwnProperty(nomeTabela)) {
                 estadoFilas[nomeTabela] = true;
-                await sock.sendMessage(remoteJid, { text: `🟢 Fila ${numeroFila} (${nomeTabela}) foi ATIVADA com sucesso!` });
+                await sock.sendMessage(remoteJid, { text: `🟢 Fila ${numeroFila} (${nomeTabela} - ${MAPA_DISPOSITIVOS[nomeTabela]}) foi ATIVADA com sucesso!` });
             }
         }
 
@@ -537,25 +913,25 @@ async function iniciarWhatsAppBot() {
             const nomeTabela = `fila_sms_${numeroFila}`;
             if (estadoFilas.hasOwnProperty(nomeTabela)) {
                 estadoFilas[nomeTabela] = false;
-                await sock.sendMessage(remoteJid, { text: `🔴 Fila ${numeroFila} (${nomeTabela}) foi DESATIVADA.` });
+                await sock.sendMessage(remoteJid, { text: `🔴 Fila ${numeroFila} (${nomeTabela} - ${MAPA_DISPOSITIVOS[nomeTabela]}) foi DESATIVADA.` });
             }
         }
 
         if (comando.startsWith('.onfila')) {
             const numeroFila = comando.replace('.onfila', '').trim();
             const nomeTabela = `fila_sms_${numeroFila}`;
-            
+
             if (estadoFilas.hasOwnProperty(nomeTabela)) {
                 const estaAtiva = estadoFilas[nomeTabela];
-                
+
                 const { count } = await supabase
                     .from(nomeTabela)
                     .select('*', { count: 'exact', head: true })
                     .eq('status', 'pendente');
 
                 const statusTexto = estaAtiva ? '🟢 ATIVA' : '🔴 DESATIVADA';
-                const respostaStatus = `📊 *STATUS DA FILA ${numeroFila}*\n\n📌 Tabela: \`${nomeTabela}\`\n⚡ Estado: ${statusTexto}\n📦 Pedidos pendentes: ${count || 0}`;
-                
+                const respostaStatus = `📊 *STATUS DA FILA ${numeroFila}*\n\n📌 Tabela: \`${nomeTabela}\` (${MAPA_DISPOSITIVOS[nomeTabela]})\n⚡ Estado: ${statusTexto}\n📦 Pedidos pendentes: ${count || 0}`;
+
                 await sock.sendMessage(remoteJid, { text: respostaStatus });
             }
         }
