@@ -118,10 +118,18 @@ function extrairReferencia(texto) {
     return "NAO_ENCONTRADA";
 }
 
+function normalizarValorNumerico(valorBruto) {
+    if (valorBruto === null || valorBruto === undefined) return null;
+    const match = String(valorBruto).match(/(\d+(?:[.,]\d+)?)/);
+    if (!match) return null;
+    const numero = parseFloat(match[1].replace(',', '.'));
+    return Number.isNaN(numero) ? null : numero.toString();
+}
+
 function extrairValorMT(texto) {
     const matchValor = texto.match(/(\d+([.,]\d+)?)\s*MT/i);
     if (matchValor) {
-        return parseFloat(matchValor[1].replace(',', '.')).toString();
+        return normalizarValorNumerico(matchValor[1]) || '0';
     }
     return '0';
 }
@@ -230,22 +238,26 @@ async function processarPedidoValidado({
         return false;
     }
 
+    // Prioriza sempre o valor real guardado em transecoes_pendentes para evitar edição fraudulenta no texto
+    const valorGuardado = normalizarValorNumerico(transacaoReal.valor);
+    const valorFinal = valorGuardado !== null ? valorGuardado : valorConfirmado;
+
     const { data: preco } = await supabase
         .from('tabela_precos')
         .select('megas')
-        .eq('valor', valorConfirmado)
+        .eq('valor', valorFinal)
         .maybeSingle();
 
     if (!preco || !preco.megas) {
         await supabase.from('sms_entrada').update({
             status: 'valor_nao_corresponde',
             referencia,
-            valor: String(valorConfirmado)
+            valor: String(valorFinal)
         }).eq('id', itemId);
 
         await enviarSmsCliente(
             clientePagador,
-            `O valor que enviaste (${valorConfirmado}MT) nao corresponde na nossa tabela. Entre em contato com o suporte: ${NUMERO_SUPORTE}.`
+            `O valor que enviaste (${valorFinal}MT) nao corresponde na nossa tabela. Entre em contato com o suporte: ${NUMERO_SUPORTE}.`
         );
         return false;
     }
@@ -255,18 +267,18 @@ async function processarPedidoValidado({
     await supabase.from('sms_entrada').update({
         status: 'processado',
         referencia,
-        valor: String(valorConfirmado)
+        valor: String(valorFinal)
     }).eq('id', itemId);
 
     await supabase.from('sms_macro').insert([{
         referencia,
-        valor: valorConfirmado,
+        valor: valorFinal,
         sender: String(clientePagador)
     }]);
 
     await supabase.from('memoria_aguardando').insert([{
         sender: String(clientePagador),
-        valor: valorConfirmado,
+        valor: valorFinal,
         referencia
     }]);
 
