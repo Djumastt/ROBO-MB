@@ -43,6 +43,10 @@ const MAPA_DISPOSITIVOS = {
 
 // O seu número pessoal/do agente (que deve ser ignorado como destino de megas)
 const MEU_NUMERO_VODACOM = '856597911';
+const NUMERO_SUPORTE = '+258 85 867 4827';
+
+// Tempo de espera após entrada na tabela sms_entrada (5 segundos)
+const ESPERA_SMS_ENTRADA_MS = 5000;
 
 // Estado global de ativação das filas filhas
 const estadoFilas = {
@@ -60,6 +64,10 @@ const estadoFilas = {
 // Estado interativo do comando .addnr no WhatsApp (por utilizador)
 const sessoesAddNr = new Map();
 const TEMPO_EXPIRACAO_SESSAO_MS = 2 * 60 * 1000; // 2 minutos
+
+function dormir(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function normalizarNumeroMZ(numero) {
     const digitos = String(numero || '').replace(/\D/g, '');
@@ -222,6 +230,28 @@ async function processarPedidoValidado({
         return false;
     }
 
+    const { data: preco } = await supabase
+        .from('tabela_precos')
+        .select('megas')
+        .eq('valor', valorConfirmado)
+        .maybeSingle();
+
+    if (!preco || !preco.megas) {
+        await supabase.from('sms_entrada').update({
+            status: 'valor_nao_corresponde',
+            referencia,
+            valor: String(valorConfirmado)
+        }).eq('id', itemId);
+
+        await enviarSmsCliente(
+            clientePagador,
+            `O valor que enviaste (${valorConfirmado}MT) nao corresponde na nossa tabela. Entre em contato com o suporte: ${NUMERO_SUPORTE}.`
+        );
+        return false;
+    }
+
+    const pacoteMegas = preco.megas;
+
     await supabase.from('sms_entrada').update({
         status: 'processado',
         referencia,
@@ -241,14 +271,6 @@ async function processarPedidoValidado({
     }]);
 
     await supabase.from('transecoes_pendentes').update({ status: 'concluido' }).eq('id', transacaoReal.id);
-
-    const { data: preco } = await supabase
-        .from('tabela_precos')
-        .select('megas')
-        .eq('valor', valorConfirmado)
-        .maybeSingle();
-
-    const pacoteMegas = preco?.megas || 'N/A';
 
     await inserirNaFilaSMS({
         telefone: numeroDestinatario,
@@ -362,6 +384,14 @@ function iniciarRoboProcessamentoSMS() {
             if (!error && pendentes && pendentes.length > 0) {
                 const item = pendentes[0];
 
+                // Se existir created_at, aguarda até completar 5 segundos desde a entrada
+                if (item.created_at) {
+                    const tempoDecorrido = Date.now() - new Date(item.created_at).getTime();
+                    if (tempoDecorrido < ESPERA_SMS_ENTRADA_MS) {
+                        await dormir(ESPERA_SMS_ENTRADA_MS - tempoDecorrido);
+                    }
+                }
+
                 // Bloqueio atômico imediato para evitar duplicações
                 const { data: bloqueado } = await supabase
                     .from('sms_entrada')
@@ -371,6 +401,11 @@ function iniciarRoboProcessamentoSMS() {
                     .select();
 
                 if (!bloqueado || bloqueado.length === 0) return;
+
+                // Garante pelo menos 5 segundos após a entrada mesmo que a tabela não tenha created_at
+                if (!item.created_at) {
+                    await dormir(ESPERA_SMS_ENTRADA_MS);
+                }
 
                 const texto = String(item.receber || '').trim();
                 const textoLower = texto.toLowerCase();
